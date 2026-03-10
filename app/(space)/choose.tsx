@@ -1,0 +1,338 @@
+import { useState, useCallback } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+  ScrollView,
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
+import { getProfile, getSpaces, setCurrentSpaceId } from '../../lib/storage';
+import { MultiavatarView } from '../../components/MultiavatarView';
+import type { UserProfile, Space } from '../../types';
+import { colors, typography, spacing, borderRadius, accessibility } from '../../constants/theme';
+
+export default function ChooseScreen() {
+  const router = useRouter();
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [spaces, setSpaces] = useState<Space[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  // useFocusEffect: reload bei jedem Screen-Fokus → sofort nach Create sichtbar
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      setLoading(true);
+      Promise.all([getProfile(), getSpaces()]).then(([p, s]) => {
+        if (active) {
+          setProfile(p);
+          setSpaces(s);
+          setLoading(false);
+        }
+      });
+      return () => {
+        active = false;
+      };
+    }, [])
+  );
+
+  if (loading) {
+    return (
+      <View style={styles.container}>
+        <ActivityIndicator size="large" color="#2563EB" />
+      </View>
+    );
+  }
+
+  return (
+    <ScrollView contentContainerStyle={styles.container}>
+      {/* Header */}
+      <Text style={styles.title}>Deine Spaces</Text>
+      {profile && (
+        <View style={styles.profileRow}>
+          <MultiavatarView uri={profile.avatarUrl} size={32} />
+          <Text style={styles.profileHint}>
+            <Text style={styles.profileName}>{profile.displayName}</Text>
+          </Text>
+        </View>
+      )}
+
+      {spaces.length === 0 ? (
+        // ── Kein Space vorhanden ────────────────────────────────────
+        <View style={styles.emptyBox}>
+          <Text style={styles.emptyText}>Du bist noch in keinem Space.</Text>
+
+          <TouchableOpacity
+            style={styles.button}
+            onPress={() => router.push('/(space)/create')}
+          >
+            <Text style={styles.buttonText}>Space erstellen</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.button, styles.buttonSecondary]}
+            onPress={() => router.push('/(space)/join')}
+          >
+            <Text style={styles.buttonText}>Per QR beitreten</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        // ── Space(s) vorhanden ───────────────────────────────────────
+        <>
+          {spaces.map((space) => {
+            const profileId = profile?.id ?? '';
+            const isOwner = profileId === space.ownerProfileId;
+            const isCoAdmin = space.coAdminProfileIds.includes(profileId);
+            const isMember = space.memberProfileIds.includes(profileId);
+            const memberCount = space.memberProfileIds.length;
+
+            // Kann QR sehen: Owner oder CoAdmin
+            const canSeeQR = isOwner || isCoAdmin;
+
+            // Rollenbezeichnung: Owner > CoAdmin > Mitglied > Gast
+            const roleLabel = isOwner
+              ? 'Eigentümer'
+              : isCoAdmin
+              ? 'CoAdmin'
+              : isMember
+              ? 'Mitglied'
+              : 'Gast';
+            const roleStyle = isOwner
+              ? styles.roleOwner
+              : isCoAdmin
+              ? styles.roleCoAdmin
+              : styles.roleMember;
+
+            return (
+              <View key={space.id} style={styles.spaceCard}>
+                <Text style={styles.spaceName}>{space.name}</Text>
+                <View style={styles.spaceMetaRow}>
+                  <View style={[styles.roleBadge, roleStyle]}>
+                    <Text style={styles.roleBadgeText}>{roleLabel}</Text>
+                  </View>
+                  <Text style={styles.spaceOwnerText}>
+                    Erstellt von: {space.ownerDisplayName}
+                  </Text>
+                  <Text style={styles.memberCount}>👥 {memberCount}</Text>
+                </View>
+
+                {/* ── Reihe 1: Admin Bereich (Owner/CoAdmin) ─────── */}
+                {(canSeeQR || isOwner) && (
+                  <View style={styles.btnRow}>
+                    <TouchableOpacity
+                      style={[styles.btn, styles.btnAdmin]}
+                      onPress={() => router.push('/(admin)')}
+                    >
+                      <Text style={styles.btnAdminText}>⚙️ Admin</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+
+                {/* ── Reihe 2: Dienstplan + Heute (nebeneinander) ────── */}
+                <View style={styles.btnRow}>
+                  <TouchableOpacity
+                    style={[styles.btn, styles.btnShift]}
+                    onPress={async () => {
+                      await setCurrentSpaceId(space.id);
+                      router.push('/(shift)/setup');
+                    }}
+                  >
+                    <Text style={styles.btnShiftText}>📋 Dienstplan</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.btn, styles.btnToday]}
+                    onPress={async () => {
+                      await setCurrentSpaceId(space.id);
+                      router.push('/(team)/today');
+                    }}
+                  >
+                    <Text style={styles.btnTodayText}>👥 Heute im Team</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            );
+          })}
+
+          <TouchableOpacity
+            style={[styles.button, { marginTop: 16 }]}
+            onPress={() => router.push('/(space)/create')}
+          >
+            <Text style={styles.buttonText}>Weiteren Space erstellen</Text>
+          </TouchableOpacity>
+        </>
+      )}
+
+      <TouchableOpacity
+        style={[styles.button, styles.buttonBack, { marginTop: 24 }]}
+        onPress={() => router.replace('/')}
+      >
+        <Text style={styles.buttonText}>Zurück zum Start</Text>
+      </TouchableOpacity>
+    </ScrollView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flexGrow: 1,
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    padding: spacing.lg,
+    paddingTop: 60,
+    paddingBottom: 40,
+  },
+  title: {
+    fontSize: typography.fontSize['2xl'],
+    fontWeight: typography.fontWeight.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  profileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginBottom: spacing.xl,
+  },
+  profileHint: {
+    fontSize: typography.fontSize.sm,
+    color: colors.textSecondary,
+  },
+  profileName: {
+    color: colors.primary,
+    fontWeight: typography.fontWeight.semibold,
+    fontSize: typography.fontSize.sm,
+  },
+  emptyBox: {
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+  },
+  emptyText: {
+    fontSize: typography.fontSize.base,
+    color: colors.textSecondary,
+    marginBottom: spacing.lg,
+    textAlign: 'center',
+  },
+  spaceCard: {
+    width: '100%',
+    backgroundColor: colors.backgroundSecondary,
+    borderRadius: borderRadius.xl,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: '#C7D7FD',
+  },
+  spaceName: {
+    fontSize: typography.fontSize.xl,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.sm,
+  },
+  spaceMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: spacing.md,
+    flexWrap: 'wrap',
+  },
+  roleBadge: {
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  roleOwner: {
+    backgroundColor: colors.primary,
+  },
+  roleMember: {
+    backgroundColor: colors.secondary,
+  },
+  roleCoAdmin: {
+    backgroundColor: '#7C3AED',
+  },
+  roleBadgeText: {
+    color: colors.textInverse,
+    fontSize: typography.fontSize.xs,
+    fontWeight: typography.fontWeight.semibold,
+  },
+  spaceOwnerText: {
+    fontSize: typography.fontSize.xs,
+    color: colors.textSecondary,
+  },
+  memberCount: {
+    fontSize: typography.fontSize.xs,
+    color: colors.textSecondary,
+    marginLeft: 'auto',
+  },
+  btnRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  btn: {
+    flex: 1,
+    minHeight: 52,
+    borderRadius: borderRadius.lg,
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  btnPrimary: {
+    backgroundColor: colors.primary,
+  },
+  btnAdmin: {
+    backgroundColor: '#7C3AED',
+    flex: 1,
+  },
+  btnAdminText: {
+    color: colors.textInverse,
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+    textAlign: 'center',
+  },
+  btnShift: {
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#86EFAC',
+  },
+  btnShiftText: {
+    color: '#065F46',
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+    textAlign: 'center',
+  },
+  btnToday: {
+    backgroundColor: '#EFF6FF',
+    borderWidth: 1,
+    borderColor: '#93C5FD',
+  },
+  btnTodayText: {
+    color: colors.primaryDark,
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+    textAlign: 'center',
+  },
+  button: {
+    backgroundColor: colors.primary,
+    paddingVertical: 14,
+    paddingHorizontal: spacing.lg,
+    borderRadius: borderRadius.lg,
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    minHeight: accessibility.minTapHeight,
+  },
+  buttonSecondary: {
+    backgroundColor: colors.secondary,
+  },
+  buttonBack: {
+    backgroundColor: colors.secondaryLight,
+  },
+  buttonText: {
+    color: colors.textInverse,
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.semibold,
+    textAlign: 'center',
+  },
+});

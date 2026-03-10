@@ -2,6 +2,7 @@
   "expo": {
     "name": "yasa",
     "slug": "yasa",
+    "scheme": "yasa",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -16,6 +17,7 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.bonitox.yasa",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -25,6 +27,16 @@
     },
     "web": {
       "favicon": "./assets/favicon.png"
-    }
+    },
+    "plugins": [
+      "expo-router"
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "56a1de94-acba-4c5b-b00b-8a8eba4c3a95"
+      }
+    },
+    "owner": "bonitox"
   }
 }

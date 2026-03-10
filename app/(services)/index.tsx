@@ -1,0 +1,654 @@
+import { useState, useCallback } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ScrollView,
+  ActivityIndicator,
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { getProfile, getSpaces, getCurrentSpaceId, getOpenSwapRequests } from '../../lib/storage';
+import { MultiavatarView } from '../../components/MultiavatarView';
+import type { UserProfile } from '../../types';
+import { typography, spacing, borderRadius, shadows, warmHuman } from '../../constants/theme';
+import { Button } from '../../components/Button';
+
+// ─── Service Definitionen ────────────────────────────────────────────────────
+
+interface ServiceItem {
+  id: string;
+  icon: string;
+  title: string;
+  description: string;
+  route: string;
+  requiresSpace: boolean;
+}
+
+const PRIMARY_SERVICES: ServiceItem[] = [
+  {
+    id: 'time-account',
+    icon: '📊',
+    title: 'Urlaubs- & Freizeitkonto',
+    description: 'Wochenarbeitszeit, Stundenkonto und Regelwerk.',
+    route: '/(services)/time-account',
+    requiresSpace: false,
+  },
+  {
+    id: 'strategy',
+    icon: '💡',
+    title: 'Brückentag-Strategie',
+    description: 'Optimiere freie Tage mit smarten Tipps.',
+    route: '/(shift)/strategy',
+    requiresSpace: false,
+  },
+];
+
+const SECONDARY_SERVICES: ServiceItem[] = [
+  {
+    id: 'shiftpals',
+    icon: '👥',
+    title: 'Meine Shiftpals',
+    description: 'Sieh, wer heute mit dir arbeitet.',
+    route: '/(team)/today',
+    requiresSpace: true,
+  },
+  {
+    id: 'pattern',
+    icon: '📋',
+    title: 'Mein Schichtmuster',
+    description: 'Richte dein Schichtmuster ein.',
+    route: '/(shift)/setup',
+    requiresSpace: false,
+  },
+  {
+    id: 'calendar',
+    icon: '📅',
+    title: 'Mein Kalender',
+    description: 'Dein persönlicher Schichtkalender.',
+    route: '/(shift)/calendar',
+    requiresSpace: false,
+  },
+  {
+    id: 'swap',
+    icon: '🔄',
+    title: 'Schichttausch',
+    description: 'Tausche Dienste mit Kollegen.',
+    route: '/(swap)',
+    requiresSpace: true,
+  },
+  {
+    id: 'candidates',
+    icon: '🤝',
+    title: 'Swap-Kandidaten',
+    description: 'Finde freie Kollegen für Tausch.',
+    route: '/(swap)/candidates',
+    requiresSpace: true,
+  },
+];
+
+// ─── Component ─────────────────────────────────────────────────────────────
+
+export default function ServicesScreen() {
+  const router = useRouter();
+  const navigation = useNavigation();
+  const [profile, setProfile] = useState<UserProfile | null>(null);
+  const [hasSpace, setHasSpace] = useState(false);
+  const [openSwapCount, setOpenSwapCount] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  useFocusEffect(
+    useCallback(() => {
+      let active = true;
+      setLoading(true);
+      Promise.all([getProfile(), getSpaces(), getCurrentSpaceId()]).then(
+        async ([p, spaces, currentId]) => {
+          if (!active) return;
+          setProfile(p);
+          const activeSpace = currentId ? spaces.find((s) => s.id === currentId) ?? null : null;
+          const memberInSpace =
+            activeSpace && p
+              ? activeSpace.memberProfiles.some((m) => m.id === p.id)
+              : false;
+          setHasSpace(memberInSpace);
+          let swapCount = 0;
+          if (currentId && memberInSpace) {
+            const openSwaps = await getOpenSwapRequests(currentId);
+            swapCount = openSwaps.length;
+          }
+          if (!active) return;
+          setOpenSwapCount(swapCount);
+          setLoading(false);
+        }
+      );
+      return () => {
+        active = false;
+      };
+    }, [])
+  );
+
+  if (loading) {
+    return (
+      <View style={styles.center}>
+        <ActivityIndicator size="large" color={warmHuman.primary} />
+      </View>
+    );
+  }
+
+  // ── Guard: kein Profil → Hinweis + CTA ──────────────────────────────────
+  if (!profile) {
+    return (
+      <View style={styles.center}>
+        <Text style={styles.guardIcon}>🔒</Text>
+        <Text style={styles.guardTitle}>Profil benötigt</Text>
+        <Text style={styles.guardDesc}>
+          Du brauchst ein ID-Profil, um YASA Services zu nutzen.
+        </Text>
+        <Button
+          label="ID-Profil erstellen"
+          onPress={() => router.replace('/(auth)/create-profile')}
+          fullWidth
+          variant="hero"
+        />
+        <Button
+          label="Zurück zum Start"
+          onPress={handleBackToStart}
+          variant="subtle"
+          fullWidth
+        />
+      </View>
+    );
+  }
+
+  function handleOpenService(service: ServiceItem) {
+    if (service.requiresSpace && !hasSpace) {
+      router.push('/(space)/choose');
+      return;
+    }
+    if (service.id === 'candidates') {
+      router.push({
+        pathname: '/(swap)/candidates',
+        params: { returnTo: '/(services)' },
+      });
+      return;
+    }
+    router.push(service.route as `/${string}`);
+  }
+
+  function handleBackToStart() {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/');
+  }
+
+  return (
+    <ScrollView contentContainerStyle={styles.container}>
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.title}>Services</Text>
+        <View style={styles.profileRow}>
+          <MultiavatarView uri={profile.avatarUrl} size={28} />
+          <Text style={styles.profileName}>{profile.displayName}</Text>
+        </View>
+      </View>
+
+      {/* Space-Hinweis wenn keiner vorhanden */}
+      {!hasSpace && (
+        <View style={styles.spaceHint}>
+          <Text style={styles.spaceHintIcon}>⚠️</Text>
+          <View style={styles.spaceHintContent}>
+            <Text style={styles.spaceHintTitle}>Kein aktiver Space</Text>
+            <Text style={styles.spaceHintDesc}>
+              Wähle oder erstelle einen Space, um alle Services zu nutzen.
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.spaceHintBtn}
+            onPress={() => router.push('/(space)/choose')}
+          >
+            <Text style={styles.spaceHintBtnText}>→</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* ── Primary Services Zone ────────────────────────────────────────── */}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionLabel}>Produktivität</Text>
+      </View>
+
+      <View style={styles.primaryServices}>
+        {PRIMARY_SERVICES.map((service) => (
+          <TouchableOpacity
+            key={service.id}
+            style={styles.primaryServiceCard}
+            onPress={() => handleOpenService(service)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.primaryServiceContent}>
+              <Text style={styles.primaryServiceIcon}>{service.icon}</Text>
+              <View style={styles.primaryServiceInfo}>
+                <Text style={styles.primaryServiceTitle}>{service.title}</Text>
+                <Text style={styles.primaryServiceDesc}>{service.description}</Text>
+              </View>
+            </View>
+            <Text style={styles.primaryServiceArrow}>→</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* ── Secondary Services Zone ───────────────────────────────────────── */}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionLabel}>Weitere Services</Text>
+      </View>
+
+      <View style={styles.secondaryServices}>
+        {SECONDARY_SERVICES.map((service) => {
+          const isDisabled = service.requiresSpace && !hasSpace;
+          return (
+            <TouchableOpacity
+              key={service.id}
+              style={[styles.secondaryServiceCard, isDisabled && styles.secondaryServiceCardDisabled]}
+              onPress={() => handleOpenService(service)}
+              activeOpacity={0.7}
+              disabled={isDisabled}
+            >
+              <View style={styles.secondaryServiceContent}>
+                <Text style={styles.secondaryServiceIcon}>{service.icon}</Text>
+                <View style={styles.secondaryServiceInfo}>
+                  <View style={styles.secondaryServiceTitleRow}>
+                    <Text style={styles.secondaryServiceTitle}>{service.title}</Text>
+                    {service.id === 'swap' && openSwapCount > 0 && (
+                      <View style={styles.swapBadge}>
+                        <Text style={styles.swapBadgeText}>{openSwapCount}</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.secondaryServiceDesc}>{service.description}</Text>
+                  {isDisabled && (
+                    <Text style={styles.disabledHint}>Space benötigt</Text>
+                  )}
+                </View>
+              </View>
+              <Text style={isDisabled ? styles.secondaryServiceArrowDisabled : styles.secondaryServiceArrow}>
+                →
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
+      </View>
+
+      {/* ── Premium Urlaub Section ───────────────────────────────────────── */}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionLabel}>Urlaub & Freizeit</Text>
+      </View>
+
+      <View style={styles.vacationCard}>
+        <View style={styles.vacationCardBanner}>
+          <Text style={styles.vacationEmojis}>🌴 🏖️ ✈️</Text>
+          <View style={styles.vacationBadge}>
+            <Text style={styles.vacationBadgeText}>Top-Feature</Text>
+          </View>
+        </View>
+        <View style={styles.vacationCardBody}>
+          <Text style={styles.vacationCardTitle}>Ab in den Urlaub</Text>
+          <Text style={styles.vacationCardDesc}>
+            Urlaub planen, Reiseziel aussuchen und direkt buchen – alles in YASA.
+          </Text>
+          <View style={styles.vacationActions}>
+            <TouchableOpacity
+              style={styles.vacationPrimaryBtn}
+              onPress={() => router.push('/(shift)/vacation')}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.vacationPrimaryBtnText}>Urlaub planen →</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.vacationSecondaryBtn}
+              onPress={() => router.push('/(affiliate)')}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.vacationSecondaryBtnText}>🎁 Reisen</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+        <View style={styles.vacationNote}>
+          <Text style={styles.vacationNoteText}>
+            Reisen & Freizeit ist direkt in deinem Urlaubsbereich integriert.
+          </Text>
+        </View>
+      </View>
+
+      {/* ── Back Button ────────────────────────────────────────────────── */}
+      <TouchableOpacity
+        style={styles.backButton}
+        onPress={handleBackToStart}
+        activeOpacity={0.7}
+      >
+        <Text style={styles.backButtonText}>← Zurück</Text>
+      </TouchableOpacity>
+    </ScrollView>
+  );
+}
+
+// ─── Styles ──────────────────────────────────────────────────────────────────
+
+const styles = StyleSheet.create({
+  center: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: warmHuman.surface,
+    padding: spacing.lg,
+  },
+  container: {
+    flexGrow: 1,
+    backgroundColor: warmHuman.surface,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.xl,
+  },
+  // Header
+  header: {
+    marginBottom: spacing.lg,
+  },
+  title: {
+    fontSize: typography.fontSize['3xl'],
+    fontWeight: typography.fontWeight.bold,
+    color: warmHuman.ink,
+    marginBottom: spacing.sm,
+  },
+  profileRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  profileName: {
+    fontSize: typography.fontSize.sm,
+    color: warmHuman.textSecondary,
+    fontWeight: typography.fontWeight.medium,
+  },
+  // Section Headers
+  sectionHeader: {
+    marginBottom: spacing.md,
+    marginTop: spacing.sm,
+  },
+  sectionLabel: {
+    fontSize: typography.fontSize.xs,
+    fontWeight: typography.fontWeight.medium,
+    color: warmHuman.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+  },
+  // Space Hint
+  spaceHint: {
+    backgroundColor: warmHuman.accentLight,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+    borderWidth: 1,
+    borderColor: warmHuman.accent,
+  },
+  spaceHintIcon: {
+    fontSize: 20,
+    marginRight: spacing.sm,
+  },
+  spaceHintContent: {
+    flex: 1,
+  },
+  spaceHintTitle: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+    color: warmHuman.ink,
+    marginBottom: 2,
+  },
+  spaceHintDesc: {
+    fontSize: typography.fontSize.xs,
+    color: warmHuman.textSecondary,
+  },
+  spaceHintBtn: {
+    backgroundColor: warmHuman.accent,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+  },
+  spaceHintBtnText: {
+    color: warmHuman.ink,
+    fontWeight: typography.fontWeight.bold,
+  },
+  // Primary Services
+  primaryServices: {
+    gap: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  primaryServiceCard: {
+    backgroundColor: warmHuman.surfaceCard,
+    borderRadius: borderRadius.xl,
+    padding: spacing.lg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: warmHuman.borderLight,
+    ...shadows.md,
+  },
+  primaryServiceContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  primaryServiceIcon: {
+    fontSize: 32,
+    marginRight: spacing.md,
+  },
+  primaryServiceInfo: {
+    flex: 1,
+  },
+  primaryServiceTitle: {
+    fontSize: typography.fontSize.lg,
+    fontWeight: typography.fontWeight.bold,
+    color: warmHuman.ink,
+    marginBottom: 2,
+  },
+  primaryServiceDesc: {
+    fontSize: typography.fontSize.sm,
+    color: warmHuman.textSecondary,
+  },
+  primaryServiceArrow: {
+    fontSize: 20,
+    color: warmHuman.primary,
+    fontWeight: typography.fontWeight.bold,
+  },
+  // Secondary Services
+  secondaryServices: {
+    gap: spacing.sm,
+    marginBottom: spacing.lg,
+  },
+  secondaryServiceCard: {
+    backgroundColor: warmHuman.surfaceCard,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: warmHuman.borderLight,
+    ...shadows.sm,
+  },
+  secondaryServiceCardDisabled: {
+    opacity: 0.5,
+  },
+  secondaryServiceContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  secondaryServiceIcon: {
+    fontSize: 24,
+    marginRight: spacing.sm,
+  },
+  secondaryServiceInfo: {
+    flex: 1,
+  },
+  secondaryServiceTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  secondaryServiceTitle: {
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.semibold,
+    color: warmHuman.ink,
+  },
+  swapBadge: {
+    backgroundColor: warmHuman.accent,
+    borderRadius: 10,
+    minWidth: 20,
+    height: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+  },
+  swapBadgeText: {
+    color: warmHuman.ink,
+    fontSize: typography.fontSize.xs,
+    fontWeight: typography.fontWeight.bold,
+  },
+  secondaryServiceDesc: {
+    fontSize: typography.fontSize.xs,
+    color: warmHuman.textSecondary,
+    marginTop: 2,
+  },
+  disabledHint: {
+    fontSize: typography.fontSize.xs,
+    color: warmHuman.accent,
+    fontWeight: typography.fontWeight.medium,
+    marginTop: 2,
+  },
+  secondaryServiceArrow: {
+    fontSize: 18,
+    color: warmHuman.textMuted,
+  },
+  secondaryServiceArrowDisabled: {
+    fontSize: 18,
+    color: warmHuman.textMuted,
+    opacity: 0.5,
+  },
+  // Vacation Card (Premium)
+  vacationCard: {
+    borderRadius: borderRadius['2xl'],
+    marginBottom: spacing.lg,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: warmHuman.primary,
+  },
+  vacationCardBanner: {
+    backgroundColor: warmHuman.primary,
+    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+  },
+  vacationEmojis: {
+    fontSize: 36,
+    letterSpacing: 4,
+  },
+  vacationBadge: {
+    position: 'absolute',
+    top: spacing.sm,
+    right: spacing.sm,
+    backgroundColor: warmHuman.accent,
+    borderRadius: borderRadius.full,
+    paddingVertical: 4,
+    paddingHorizontal: spacing.sm,
+  },
+  vacationBadgeText: {
+    color: warmHuman.ink,
+    fontSize: typography.fontSize.xs,
+    fontWeight: typography.fontWeight.bold,
+  },
+  vacationCardBody: {
+    backgroundColor: warmHuman.surfaceCard,
+    padding: spacing.md,
+  },
+  vacationCardTitle: {
+    fontSize: typography.fontSize.xl,
+    fontWeight: typography.fontWeight.bold,
+    color: warmHuman.primary,
+    marginBottom: spacing.xs,
+  },
+  vacationCardDesc: {
+    fontSize: typography.fontSize.sm,
+    color: warmHuman.textSecondary,
+    lineHeight: 20,
+    marginBottom: spacing.md,
+  },
+  vacationActions: {
+    gap: spacing.sm,
+  },
+  vacationPrimaryBtn: {
+    backgroundColor: warmHuman.primary,
+    borderRadius: borderRadius.md,
+    paddingVertical: 12,
+    alignItems: 'center',
+  },
+  vacationPrimaryBtnText: {
+    color: warmHuman.textInverse,
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.bold,
+  },
+  vacationSecondaryBtn: {
+    backgroundColor: warmHuman.surfaceWarm,
+    borderRadius: borderRadius.md,
+    paddingVertical: 12,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: warmHuman.borderLight,
+  },
+  vacationSecondaryBtnText: {
+    color: warmHuman.ink,
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.medium,
+  },
+  vacationNote: {
+    paddingTop: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: warmHuman.borderLight,
+  },
+  vacationNoteText: {
+    fontSize: typography.fontSize.xs,
+    color: warmHuman.textMuted,
+    lineHeight: 18,
+  },
+  // Back Button
+  backButton: {
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    marginTop: spacing.md,
+  },
+  backButtonText: {
+    fontSize: typography.fontSize.base,
+    color: warmHuman.textSecondary,
+    fontWeight: typography.fontWeight.medium,
+  },
+  // Guard Styles
+  guardIcon: {
+    fontSize: 56,
+    marginBottom: spacing.lg,
+  },
+  guardTitle: {
+    fontSize: typography.fontSize['2xl'],
+    fontWeight: typography.fontWeight.bold,
+    color: warmHuman.ink,
+    marginBottom: spacing.sm,
+  },
+  guardDesc: {
+    fontSize: typography.fontSize.base,
+    color: warmHuman.textSecondary,
+    textAlign: 'center',
+    marginBottom: spacing.xl,
+    lineHeight: 22,
+  },
+});
