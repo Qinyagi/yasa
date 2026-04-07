@@ -9,24 +9,39 @@ import {
   Switch,
   TextInput,
   Alert,
-  Modal,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import {
   getProfile,
   getSpaces,
+  getCurrentSpaceId,
+  setSpaces,
   updateCoAdmins,
   createGhost,
   listGhosts,
   archiveGhost,
 } from '../../lib/storage';
+import { syncTeamSpaces } from '../../lib/backend/teamSync';
+import { useRealtimeMemberSync } from '../../lib/backend/realtimeMembers';
+import { pushGhostsForSpace } from '../../lib/backend/ghostSync';
 import { colors } from '../../constants/theme';
 import { MultiavatarView } from '../../components/MultiavatarView';
+import { resolveAvatarSeed } from '../../lib/avatarSeed';
+import { ResponsiveModal } from '../../components/ResponsiveModal';
 import type { Space, UserProfile, MemberSnapshot } from '../../types';
 
 export default function ManageScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
   const { spaceId } = useLocalSearchParams<{ spaceId: string }>();
+  const handleBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(space)/choose');
+  }, [navigation, router]);
 
   const [loading, setLoading] = useState(true);
   const [space, setSpace] = useState<Space | null>(null);
@@ -66,6 +81,30 @@ export default function ManageScreen() {
     loadData();
   }, [loadData]);
 
+  // Realtime member sync: listen to member changes for this space
+  // This ensures manage.tsx shows fresh member list without manual refresh
+  useRealtimeMemberSync(
+    profile?.id,
+    spaceId ? [spaceId] : [],
+    useCallback(async () => {
+      if (!profile || !spaceId) return;
+      const localSpaces = await getSpaces();
+      const current = localSpaces.find((s) => s.id === spaceId);
+      if (!current) return;
+      try {
+        const syncResult = await syncTeamSpaces(profile.id, localSpaces);
+        const updated = syncResult.spaces.find((s) => s.id === spaceId);
+        if (updated) {
+          await setSpaces(localSpaces.map((s) => (s.id === updated.id ? updated : s)));
+          setSpace(updated);
+          setCoAdmins(updated.coAdminProfileIds ?? []);
+        }
+      } catch {
+        // best-effort — focus-sync on next focus will recover
+      }
+    }, [profile?.id, spaceId])
+  );
+
   async function handleToggleCoAdmin(memberId: string) {
     if (!space || saving) return;
 
@@ -87,6 +126,15 @@ export default function ManageScreen() {
     try {
       const newGhost = await createGhost(space.id, ghostLabel.trim(), profile.id);
       setGhosts((prev) => [...prev, newGhost]);
+
+      // Push updated ghost list to backend so other devices can discover this ghost
+      try {
+        const updatedGhosts = await listGhosts(space.id);
+        await pushGhostsForSpace(space.id, updatedGhosts);
+      } catch {
+        // best-effort — members will pick up ghosts on next pull
+      }
+
       setGhostLabel('');
       setShowGhostModal(false);
     } catch {
@@ -110,6 +158,15 @@ export default function ManageScreen() {
             setArchivingId(ghostId);
             await archiveGhost(space.id, ghostId);
             setGhosts((prev) => prev.filter((g) => g.id !== ghostId));
+
+            // Push updated ghost list (archived ghost no longer in active list)
+            try {
+              const remaining = await listGhosts(space.id);
+              await pushGhostsForSpace(space.id, remaining);
+            } catch {
+              // best-effort
+            }
+
             setArchivingId(null);
           },
         },
@@ -131,7 +188,7 @@ export default function ManageScreen() {
     return (
       <View style={styles.container}>
         <Text style={styles.errorText}>Space nicht gefunden.</Text>
-        <TouchableOpacity style={styles.button} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.button} onPress={handleBack}>
           <Text style={styles.buttonText}>Zurück</Text>
         </TouchableOpacity>
       </View>
@@ -146,7 +203,7 @@ export default function ManageScreen() {
         <Text style={styles.restrictedText}>
           Nur der Space-Ersteller kann verwalten.
         </Text>
-        <TouchableOpacity style={styles.button} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.button} onPress={handleBack}>
           <Text style={styles.buttonText}>Zurück</Text>
         </TouchableOpacity>
       </View>
@@ -154,6 +211,9 @@ export default function ManageScreen() {
   }
 
   // ── Owner-View ───────────────────────────────────────────────────────────────
+  const memberHistory = space.memberHistory ?? [];
+  const removedEntries = memberHistory.filter((h) => h.active === false);
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
       <Text style={styles.title}>{space.name}</Text>
@@ -166,11 +226,19 @@ export default function ManageScreen() {
         </Text>
       </View>
 
-      {/* Mitgliederliste */}
-      <Text style={styles.sectionLabel}>Mitglieder ({space.memberProfiles.length})</Text>
+      {/* Memberliste Button (Host-only) */}
+      <TouchableOpacity
+        style={styles.membersNavBtn}
+        onPress={() => router.push(`/(space)/members?spaceId=${space.id}`)}
+      >
+        <Text style={styles.membersNavBtnText}>👥 Memberliste & Timeline</Text>
+      </TouchableOpacity>
+
+      {/* Memberliste */}
+      <Text style={styles.sectionLabel}>Member ({space.memberProfiles.length})</Text>
 
       {space.memberProfiles.length === 0 ? (
-        <Text style={styles.emptyText}>Keine Mitglieder gefunden.</Text>
+        <Text style={styles.emptyText}>Keine Member gefunden.</Text>
       ) : (
         <View style={styles.memberList}>
           {space.memberProfiles.map((member: MemberSnapshot) => {
@@ -180,21 +248,16 @@ export default function ManageScreen() {
             return (
               <View key={member.id} style={styles.memberRow}>
                 {/* Avatar */}
-                {member.avatarUrl ? (
-                  <MultiavatarView uri={member.avatarUrl} size={40} />
-                ) : (
-                  <View style={styles.avatarFallback}>
-                    <Text style={styles.avatarFallbackText}>
-                      {member.displayName.charAt(0).toUpperCase()}
-                    </Text>
-                  </View>
-                )}
+                <MultiavatarView
+                  seed={resolveAvatarSeed(member.id, member.displayName, member.avatarUrl)}
+                  size={40}
+                />
 
                 {/* Name + Rolle */}
                 <View style={styles.memberInfo}>
                   <Text style={styles.memberName}>{member.displayName}</Text>
                   <Text style={styles.memberRole}>
-                    {isOwner ? 'Eigentümer' : isCoAdmin ? 'CoAdmin' : 'Mitglied'}
+                    {isOwner ? 'Host' : isCoAdmin ? 'CoAdmin' : 'Member'}
                   </Text>
                 </View>
 
@@ -222,6 +285,40 @@ export default function ManageScreen() {
         <Text style={styles.savingText}>Speichern…</Text>
       )}
 
+      {/* ── Ausgetretene Member (readonly history) ───────────────────── */}
+      {removedEntries.length > 0 && (
+        <View style={styles.removedSection}>
+          <Text style={styles.sectionLabel}>Ausgetretene Member ({removedEntries.length})</Text>
+          <Text style={styles.removedHint}>
+            Diese Einträge sind Verlauf (nur lesbar) und dokumentieren den Austritt.
+          </Text>
+          {removedEntries.map((entry) => (
+            <View key={entry.id} style={styles.removedCard}>
+              <View style={styles.removedStripeWrap}>
+                <Text style={styles.removedStripeText}>AUSGETRETEN</Text>
+              </View>
+              <View style={styles.memberRow}>
+                <MultiavatarView
+                  seed={resolveAvatarSeed(entry.id, entry.displayName, entry.avatarUrl)}
+                  size={40}
+                />
+                <View style={styles.memberInfo}>
+                  <Text style={styles.memberName}>{entry.displayName}</Text>
+                  <Text style={styles.memberRole}>
+                    Beigetreten: {new Date(entry.joinedAt).toLocaleString('de-DE')}
+                  </Text>
+                  {entry.removedAt && (
+                    <Text style={styles.removedAtText}>
+                      Ausgetreten: {new Date(entry.removedAt).toLocaleString('de-DE')}
+                    </Text>
+                  )}
+                </View>
+              </View>
+            </View>
+          ))}
+        </View>
+      )}
+
       {/* ── Ghost-Teammitglieder ──────────────────────────────────────── */}
       <View style={styles.ghostSection}>
         <Text style={styles.sectionLabel}>Ghost-Teammitglieder ({ghosts.length})</Text>
@@ -229,7 +326,7 @@ export default function ManageScreen() {
         <View style={styles.ghostInfoBox}>
           <Text style={styles.ghostInfoText}>
             👻 Ghosts sind Platzhalter für Kollegen, die noch kein eigenes Profil haben.
-            Alle Mitglieder können Ghosts als „anwesend" markieren.
+            Alle Member können Ghosts als „anwesend" markieren.
           </Text>
         </View>
 
@@ -237,7 +334,7 @@ export default function ManageScreen() {
         {ghosts.length > 0 && (
           <View style={styles.memberList}>
             {ghosts.map((ghost) => {
-              const seed = ghost.avatarUrl || `${space.id}:${ghost.ghostLabel}`.toLowerCase();
+              const seed = resolveAvatarSeed(ghost.id, ghost.ghostLabel ?? ghost.displayName, ghost.avatarUrl);
               return (
                 <View key={ghost.id} style={styles.memberRow}>
                   <MultiavatarView seed={seed} size={40} />
@@ -276,14 +373,11 @@ export default function ManageScreen() {
       </View>
 
       {/* ── Ghost Modal ───────────────────────────────────────────────── */}
-      <Modal
+      <ResponsiveModal
         visible={showGhostModal}
-        transparent
-        animationType="fade"
         onRequestClose={() => setShowGhostModal(false)}
+        contentStyle={styles.modalContent}
       >
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
             <Text style={styles.modalTitle}>Ghost hinzufügen</Text>
             <Text style={styles.modalDesc}>
               Gib einen Namen oder ein Kürzel für den Platzhalter ein.
@@ -332,13 +426,11 @@ export default function ManageScreen() {
                 )}
               </TouchableOpacity>
             </View>
-          </View>
-        </View>
-      </Modal>
+      </ResponsiveModal>
 
       <TouchableOpacity
         style={[styles.button, styles.buttonBack, { marginTop: 32 }]}
-        onPress={() => router.back()}
+        onPress={handleBack}
       >
         <Text style={styles.buttonText}>Zurück</Text>
       </TouchableOpacity>
@@ -456,6 +548,49 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: colors.textTertiary,
   },
+  removedSection: {
+    width: '100%',
+    marginTop: 20,
+    marginBottom: 8,
+  },
+  removedHint: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginBottom: 8,
+    lineHeight: 18,
+  },
+  removedCard: {
+    width: '100%',
+    borderWidth: 1,
+    borderColor: colors.errorLight,
+    borderRadius: 12,
+    backgroundColor: '#FFF7F7',
+    marginBottom: 10,
+    overflow: 'hidden',
+    position: 'relative',
+  },
+  removedStripeWrap: {
+    position: 'absolute',
+    top: 10,
+    right: -40,
+    backgroundColor: 'rgba(185, 28, 28, 0.8)',
+    paddingVertical: 3,
+    paddingHorizontal: 44,
+    transform: [{ rotate: '35deg' }],
+    zIndex: 2,
+  },
+  removedStripeText: {
+    color: colors.textInverse,
+    fontSize: 10,
+    fontWeight: '700',
+    letterSpacing: 0.6,
+  },
+  removedAtText: {
+    fontSize: 12,
+    color: colors.error,
+    marginTop: 2,
+    fontWeight: '600',
+  },
   emptyText: {
     fontSize: 14,
     color: colors.textTertiary,
@@ -483,6 +618,22 @@ const styles = StyleSheet.create({
     color: colors.textInverse,
     fontSize: 16,
     fontWeight: '600',
+  },
+  // ── Members Nav Button ─────────────────────────────────────────────
+  membersNavBtn: {
+    width: '100%',
+    backgroundColor: colors.primaryBackground,
+    borderRadius: 10,
+    paddingVertical: 13,
+    alignItems: 'center',
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: colors.primaryVariant,
+  },
+  membersNavBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.primary,
   },
   // ── Ghost Section ──────────────────────────────────────────────────
   ghostSection: {
@@ -537,13 +688,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   // ── Modal ────────────────────────────────────────────────────────
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
   modalContent: {
     backgroundColor: colors.background,
     borderRadius: 16,

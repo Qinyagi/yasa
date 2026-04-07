@@ -1,0 +1,12 @@
+04:39:12.483 [ INFO] maestro.cli.report.TestDebugReporter.logSystemInfo: Debug output path: c:\Users\XyZ\Documents\YASA\yasa\.maestro_sandbox\.maestro\tests\2026-03-24_043912
+04:39:12.487 [ INFO] MAESTRO.logSystemInfo: ---- System Info ----
+04:39:12.488 [ INFO] MAESTRO.logSystemInfo: Maestro Version: 2.3.0
+04:39:12.491 [ INFO] MAESTRO.logSystemInfo: CI: Undefined
+04:39:12.492 [ INFO] MAESTRO.logSystemInfo: OS Name: Windows 11
+04:39:12.492 [ INFO] MAESTRO.logSystemInfo: OS Version: 10.0
+04:39:12.492 [ INFO] MAESTRO.logSystemInfo: Architecture: amd64
+04:39:12.495 [ INFO] MAESTRO.logSystemInfo: Java Version: 17
+04:39:12.500 [ INFO] MAESTRO.logSystemInfo: Xcode Version: null
+04:39:12.512 [ INFO] MAESTRO.logSystemInfo: Flutter Version: Undefined
+04:39:12.525 [ INFO] MAESTRO.logSystemInfo: Flutter Channel: Undefined
+04:39:12.525 [ INFO] MAESTRO.logSystemInfo: ---------------------

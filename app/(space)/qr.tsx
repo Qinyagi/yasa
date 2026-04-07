@@ -70,7 +70,7 @@ export default function QRScreen() {
             QR nur für Space-Ersteller / CoAdmins sichtbar.
           </Text>
           <Text style={styles.restrictedHint}>
-            Bitte den Eigentümer oder einen CoAdmin, dir den QR-Code vor Ort zu zeigen.
+            Bitte den Host oder einen CoAdmin, dir den QR-Code vor Ort zu zeigen.
           </Text>
         </View>
         <TouchableOpacity
@@ -84,8 +84,23 @@ export default function QRScreen() {
   }
 
   // ── QR anzeigen (Owner / CoAdmin) ────────────────────────────────────────────
-  // QR-Payload enthält Space-Metadaten für Offline-Import auf Gerät B
-  const payload = `yasa://join?spaceId=${space.id}&name=${encodeURIComponent(space.name)}&ownerId=${space.ownerProfileId}&ownerName=${encodeURIComponent(space.ownerDisplayName)}&token=${space.inviteToken}`;
+  // QR-Payload enthält Space-Metadaten für Offline-Import auf Gerät B.
+  // ownerAvatar ist der Avatar-Seed des Hosts – wird direkt aus dem lokalen
+  // MemberSnapshot gelesen, damit Gerät B den korrekten Seed sofort erhält
+  // ohne einen Backend-Sync abwarten zu müssen.
+  const ownerSnapshot = space.memberProfiles.find((m) => m.id === space.ownerProfileId);
+  const ownerAvatarSeed =
+    ownerSnapshot?.avatarUrl ||
+    profile?.avatarUrl ||
+    '';
+  const payload =
+    `yasa://join` +
+    `?spaceId=${space.id}` +
+    `&name=${encodeURIComponent(space.name)}` +
+    `&ownerId=${space.ownerProfileId}` +
+    `&ownerName=${encodeURIComponent(space.ownerDisplayName)}` +
+    `&ownerAvatar=${encodeURIComponent(ownerAvatarSeed)}` +
+    `&token=${space.inviteToken}`;
 
   return (
     <ScrollView contentContainerStyle={styles.container}>

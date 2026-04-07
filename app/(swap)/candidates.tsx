@@ -20,6 +20,7 @@ import {
 } from '../../lib/storage';
 import { colors } from '../../constants/theme';
 import { MultiavatarView } from '../../components/MultiavatarView';
+import { resolveAvatarSeed } from '../../lib/avatarSeed';
 import type { UserProfile, Space, MemberSnapshot, ShiftType } from '../../types';
 
 // ─── Helper ───────────────────────────────────────────────────────────────────
@@ -279,7 +280,10 @@ export default function CandidatesScreen() {
 
       {/* ── Meine Schicht am gewählten Tag ────────────────────────── */}
       <View style={styles.myShiftBox}>
-        <MultiavatarView uri={profile.avatarUrl} size={40} />
+        <MultiavatarView
+          seed={resolveAvatarSeed(profile.id, profile.displayName, profile.avatarUrl)}
+          size={40}
+        />
         <View style={styles.myShiftText}>
           <Text style={styles.myShiftName}>{profile.displayName} (du)</Text>
           {myShift ? (
@@ -320,7 +324,10 @@ export default function CandidatesScreen() {
       ) : (
         candidates.map(({ member }) => (
           <View key={member.id} style={styles.candidateRow}>
-            <MultiavatarView uri={member.avatarUrl} size={42} />
+            <MultiavatarView
+              seed={resolveAvatarSeed(member.id, member.displayName, member.avatarUrl)}
+              size={42}
+            />
             <Text style={styles.candidateName}>{member.displayName}</Text>
             <View style={[styles.badge, styles.badgeFree]}>
               <Text style={[styles.badgeText, styles.badgeTextFree]}>Frei</Text>

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,17 +9,38 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { getProfile, addSpace, setCurrentSpaceId, generateUUID } from '../../lib/storage';
 import type { Space } from '../../types';
 import { colors, typography, spacing, borderRadius, accessibility } from '../../constants/theme';
 
-// Zufälliges Invite-Token (8 Zeichen alphanumerisch)
+// Kryptographisch sicheres Invite-Token (32 Hex-Zeichen = 128 Bit)
 function generateToken(): string {
-  return Math.random().toString(36).substring(2, 10).toUpperCase();
+  const globalCrypto = (globalThis as { crypto?: { getRandomValues?: (arr: Uint8Array) => Uint8Array } }).crypto;
+  if (globalCrypto?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    globalCrypto.getRandomValues(bytes);
+    return Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('')
+      .toUpperCase();
+  }
+
+  // Fallback: verhindert Create-Space-Ausfall auf Runtimes ohne WebCrypto.
+  // TODO: mittelfristig expo-crypto als verpflichtende Quelle einführen.
+  return generateUUID().replace(/-/g, '').toUpperCase();
 }
 
 export default function CreateSpaceScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
+  const handleBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(space)/choose');
+  }, [navigation, router]);
   const [spaceName, setSpaceName] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -39,6 +60,7 @@ export default function CreateSpaceScreen() {
           'Du benötigst ein ID-Profil um einen Space zu erstellen.',
           [{ text: 'OK', onPress: () => router.replace('/') }]
         );
+        setSaving(false);
         return;
       }
 
@@ -63,8 +85,9 @@ export default function CreateSpaceScreen() {
 
       // Direkt zum QR-Screen (replace vermeidet Back-Loop)
       router.replace(`/(space)/qr?spaceId=${space.id}`);
-    } catch {
-      Alert.alert('Fehler', 'Space konnte nicht erstellt werden.');
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : 'Space konnte nicht erstellt werden.';
+      Alert.alert('Fehler', msg);
       setSaving(false);
     }
   }
@@ -74,7 +97,7 @@ export default function CreateSpaceScreen() {
       <Text style={styles.title}>Space erstellen</Text>
       <Text style={styles.hint}>
         Wähle einen Namen für deinen Space.{'\n'}
-        Du bist automatisch Eigentümer.
+        Du bist automatisch Space-Host.
       </Text>
 
       <Text style={styles.label}>Space-Name</Text>
@@ -104,7 +127,7 @@ export default function CreateSpaceScreen() {
 
       <TouchableOpacity
         style={[styles.button, styles.buttonBack]}
-        onPress={() => router.back()}
+        onPress={handleBack}
         disabled={saving}
       >
         <Text style={styles.buttonText}>Zurück</Text>

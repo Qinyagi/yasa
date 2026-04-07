@@ -1,0 +1,64 @@
+appId: host.exp.exponent
+---
+- runFlow:
+    when:
+      visible:
+        id: today-title
+    commands:
+      - tapOn:
+          id: today-back-to-services
+- runFlow:
+    when:
+      visible:
+        id: swap-back-to-services
+    commands:
+      - tapOn:
+          id: swap-back-to-services
+- runFlow:
+    when:
+      visible: Dienst tauschen
+    commands:
+      - tapOn: Zurück
+- runFlow:
+    when:
+      visible:
+        id: services-secondary-shiftpals
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: services-back-to-start
+          direction: DOWN
+          timeout: 15000
+      - tapOn:
+          id: services-back-to-start
+- runFlow:
+    when:
+      visible: Services
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: services-back-to-start
+          direction: DOWN
+          timeout: 15000
+      - tapOn:
+          id: services-back-to-start
+- extendedWaitUntil:
+    visible:
+      id: start-services-card
+    timeout: 20000
+- tapOn:
+    id: start-services-card
+- extendedWaitUntil:
+    visible: Services
+    timeout: 15000
+- scrollUntilVisible:
+    element:
+      id: services-back-to-start
+    direction: DOWN
+    timeout: 15000
+- tapOn:
+    id: services-back-to-start
+- extendedWaitUntil:
+    visible:
+      id: start-services-card
+    timeout: 15000

@@ -15,13 +15,17 @@ import {
   ScrollView,
   BackHandler,
   Animated,
+  InteractionManager,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
+import { Button } from '../../components/Button';
+import { BottomActionBar } from '../../components/BottomActionBar';
 import {
   getProfile,
   getShiftPlan,
   getAllShiftPlans,
+  getShiftColorOverrides,
   getCurrentSpaceId,
   listGhosts,
   todayISO,
@@ -37,6 +41,7 @@ import {
   isValidISODate,
   type DayChange,
 } from '../../lib/storage';
+import { buildShiftMetaWithOverrides } from '../../lib/shiftColors';
 import { diffDaysUTC, shiftCodeAtDate } from '../../lib/shiftEngine';
 import { getHolidayMap, type Holiday } from '../../data/holidays';
 import {
@@ -164,6 +169,7 @@ export default function CalendarScreen() {
   const [currentIndex, setCurrentIndex] = useState(TODAY_INDEX);
 
   const [shiftMap, setShiftMap] = useState<Record<string, ShiftType>>({});
+  const [shiftMeta, setShiftMeta] = useState(SHIFT_META);
   const [ghostMap, setGhostMap] = useState<Record<string, GhostDayEntry[]>>({});
 
   // Vacation planning
@@ -330,93 +336,54 @@ export default function CalendarScreen() {
   useFocusEffect(
     useCallback(() => {
       let active = true;
-      setLoading(true);
-      getProfile().then(async (p) => {
-        if (!active) return;
-        setProfile(p);
-        if (p) {
-          const shiftPlan = await getShiftPlan(p.id);
-          if (active) setPlan(shiftPlan);
+      const load = async () => {
+        setLoading(true);
+        try {
+          const p = await getProfile();
+          if (!active) return;
+          setProfile(p);
+          if (!p) {
+            setLoading(false);
+            return;
+          }
 
-          if (shiftPlan && active) {
-            const map: Record<string, ShiftType> = {};
+          const colorOverrides = await getShiftColorOverrides(p.id);
+          if (!active) return;
+          setShiftMeta(buildShiftMetaWithOverrides(colorOverrides));
+
+          // Stage 1: nur Shiftplan fuer schnellen First Paint
+          const shiftPlan = await getShiftPlan(p.id);
+          if (!active) return;
+
+          setPlan(shiftPlan);
+          const map: Record<string, ShiftType> = {};
+          if (shiftPlan) {
             for (const entry of shiftPlan.entries) {
               map[entry.dateISO] = entry.code;
             }
-            setShiftMap(map);
           }
+          setShiftMap(map);
+          setLoading(false);
 
-          // Vacation days laden
-          const vDays = await getVacationDays(p.id);
-          if (active) setVacationDays(new Set(vDays));
+          // Stage 2: weitere Kalenderdaten parallel nachladen
+          const [vDays, overrides, changes, spaceId, ur] = await Promise.all([
+            getVacationDays(p.id),
+            getShiftOverrides(p.id),
+            getDayChanges(p.id),
+            getCurrentSpaceId(),
+            getUserTimeAccountProfile(p.id),
+          ]);
+          if (!active) return;
 
-          // Shift Overrides laden
-          const overrides = await getShiftOverrides(p.id);
-          if (active) setShiftOverrides(overrides);
+          setVacationDays(new Set(vDays));
+          setShiftOverrides(overrides);
+          setDayChanges(changes);
+          setUserTaProfile(ur);
 
-          // Day Changes History laden
-          const changes = await getDayChanges(p.id);
-          if (active) setDayChanges(changes);
+          if (!spaceId) {
+            setGhostMap({});
+            setSpaceRuleProfile(null);
 
-          const spaceId = await getCurrentSpaceId();
-          if (spaceId && active) {
-            const ghosts = await listGhosts(spaceId);
-            const allPlans = await getAllShiftPlans();
-            const gMap: Record<string, GhostDayEntry[]> = {};
-            for (const ghost of ghosts) {
-              const ghostPlan = allPlans[ghost.id];
-              if (!ghostPlan) continue;
-              for (const entry of ghostPlan.entries) {
-                if (!gMap[entry.dateISO]) gMap[entry.dateISO] = [];
-                gMap[entry.dateISO].push({
-                  ghostId: ghost.id,
-                  ghostLabel: ghost.ghostLabel ?? ghost.displayName,
-                  code: entry.code,
-                });
-              }
-            }
-            if (active) setGhostMap(gMap);
-
-            // ── Time Account Daten laden ───────────────────────────────
-            const [sr, ur] = await Promise.all([
-              getSpaceRuleProfile(spaceId),
-              getUserTimeAccountProfile(p.id),
-            ]);
-            if (!active) return;
-            setSpaceRuleProfile(sr);
-            setUserTaProfile(ur);
-            // ── Auto-Show: Modal wenn Summary sich geändert hat ────────
-            if (shiftPlan && ur && hasSufficientData(shiftPlan, ur)) {
-              const { fromISO, toISO } = defaultTimeRange();
-              const version = computeSummaryVersion(shiftPlan, ur, sr, fromISO, toISO);
-              const uiState = await getTimeAccountUiState(p.id);
-              if (!active) return;
-              const dismissedInCurrentSession =
-                !!uiState &&
-                uiState.dismissedForVersion === version &&
-                !!uiState.dismissedAt &&
-                new Date(uiState.dismissedAt).getTime() >= APP_SESSION_STARTED_AT;
-
-              if (!dismissedInCurrentSession && !suppressTaModalNextAutoShow) {
-                const autoSummary = computeTimeAccountSummary({
-                  plan: shiftPlan,
-                  userProfile: ur,
-                  spaceProfile: sr,
-                  holidayMap,
-                  vacationDaySet: new Set(vDays),
-                  fromISO,
-                  toISO,
-                });
-                setTaSummary(autoSummary);
-                setShowTaModal(true);
-              }
-              suppressTaModalNextAutoShow = false;
-            }
-          } else if (p) {
-            // kein Space → nur User-Profil laden
-            const ur = await getUserTimeAccountProfile(p.id);
-            if (active) setUserTaProfile(ur);
-            // ── Auto-Show auch ohne Space ──────────────────────────────
             if (shiftPlan && ur && hasSufficientData(shiftPlan, ur)) {
               const { fromISO, toISO } = defaultTimeRange();
               const version = computeSummaryVersion(shiftPlan, ur, null, fromISO, toISO);
@@ -443,10 +410,67 @@ export default function CalendarScreen() {
               }
               suppressTaModalNextAutoShow = false;
             }
+            return;
           }
+
+          // Stage 3: Schwergewichte erst nach UI-Interaktionen laden
+          InteractionManager.runAfterInteractions(async () => {
+            const [ghosts, allPlans, sr] = await Promise.all([
+              listGhosts(spaceId),
+              getAllShiftPlans(),
+              getSpaceRuleProfile(spaceId),
+            ]);
+            if (!active) return;
+
+            const gMap: Record<string, GhostDayEntry[]> = {};
+            for (const ghost of ghosts) {
+              const ghostPlan = allPlans[ghost.id];
+              if (!ghostPlan) continue;
+              for (const entry of ghostPlan.entries) {
+                if (!gMap[entry.dateISO]) gMap[entry.dateISO] = [];
+                gMap[entry.dateISO].push({
+                  ghostId: ghost.id,
+                  ghostLabel: ghost.ghostLabel ?? ghost.displayName,
+                  code: entry.code,
+                });
+              }
+            }
+            setGhostMap(gMap);
+            setSpaceRuleProfile(sr);
+
+            if (shiftPlan && ur && hasSufficientData(shiftPlan, ur)) {
+              const { fromISO, toISO } = defaultTimeRange();
+              const version = computeSummaryVersion(shiftPlan, ur, sr, fromISO, toISO);
+              const uiState = await getTimeAccountUiState(p.id);
+              if (!active) return;
+              const dismissedInCurrentSession =
+                !!uiState &&
+                uiState.dismissedForVersion === version &&
+                !!uiState.dismissedAt &&
+                new Date(uiState.dismissedAt).getTime() >= APP_SESSION_STARTED_AT;
+
+              if (!dismissedInCurrentSession && !suppressTaModalNextAutoShow) {
+                const autoSummary = computeTimeAccountSummary({
+                  plan: shiftPlan,
+                  userProfile: ur,
+                  spaceProfile: sr,
+                  holidayMap,
+                  vacationDaySet: new Set(vDays),
+                  fromISO,
+                  toISO,
+                });
+                setTaSummary(autoSummary);
+                setShowTaModal(true);
+              }
+              suppressTaModalNextAutoShow = false;
+            }
+          });
+        } catch {
+          if (active) setLoading(false);
         }
-        if (active) setLoading(false);
-      });
+      };
+
+      void load();
       return () => { active = false; };
     }, [])
   );
@@ -568,14 +592,14 @@ export default function CalendarScreen() {
             {week.map((cell) => {
               const isToday = cell.dateISO === today;
               const shift = shiftMap[cell.dateISO];
-              const meta = shift ? SHIFT_META[shift] : null;
+              const meta = shift ? shiftMeta[shift] : null;
               const dayGhosts = ghostMap[cell.dateISO];
               const hasGhost = dayGhosts && dayGhosts.length > 0;
               const isHoliday = !!holidayMap[cell.dateISO];
               const isVacation = vacationDays.has(cell.dateISO);
               const isSchoolHoliday = !!schoolHolidayMap?.[cell.dateISO];
               const overrideCode = shiftOverrides[cell.dateISO];
-              const overrideMeta = overrideCode ? SHIFT_META[overrideCode] : null;
+              const overrideMeta = overrideCode ? shiftMeta[overrideCode] : null;
               
               // Day Change History
               const dayChange = dayChanges[cell.dateISO];
@@ -583,7 +607,7 @@ export default function CalendarScreen() {
               
               // Original-Code: aus dem Shift-Plan (shiftMap)
               const originalCode = shift && cell.inMonth ? shift : null;
-              const originalMeta = originalCode ? SHIFT_META[originalCode] : null;
+              const originalMeta = originalCode ? shiftMeta[originalCode] : null;
               
               // Priorität: U > Override > Plan (für Aktuell-Code)
               let currentCode: ShiftType | null = null;
@@ -595,7 +619,7 @@ export default function CalendarScreen() {
                 currentCode = shift;
               }
 
-              const currentMeta = currentCode ? SHIFT_META[currentCode] : null;
+              const currentMeta = currentCode ? shiftMeta[currentCode] : null;
 
               // Bestimme Hintergrund-Farbe basierend auf dem Aktuellen Code
               let cellBg: string | undefined;
@@ -672,15 +696,15 @@ export default function CalendarScreen() {
                           <Text style={styles.arrowText}>→</Text>
                         </View>
                       )}
-                      <View style={[styles.currentLine, { backgroundColor: SHIFT_META.U.bg }]}>
-                        <Text style={[styles.currentText, { color: SHIFT_META.U.fg }]}>U</Text>
+                      <View style={[styles.currentLine, { backgroundColor: shiftMeta.U.bg }]}>
+                        <Text style={[styles.currentText, { color: shiftMeta.U.fg }]}>U</Text>
                       </View>
                     </View>
                   ) : null}
 
-                  {/* Feiertag-Indikator */}
+                  {/* Feiertag-Indikator: unterer Farbrand */}
                   {isHoliday && cell.inMonth && (
-                    <View style={styles.holidayDot} />
+                    <View style={styles.holidayBottomBar} />
                   )}
 
                   {/* Override-Indikator */}
@@ -710,7 +734,7 @@ export default function CalendarScreen() {
         <GhostLegendForMonth year={item.year} month={item.month} ghostMap={ghostMap} />
       </View>
     );
-  }, [shiftMap, ghostMap, today, router, holidayMap, schoolHolidayMap, vacationDays, vacationMode, profile, plan, shiftOverrides, overrideMode, dayChanges, blinkDateISO]);
+  }, [shiftMap, shiftMeta, ghostMap, today, router, holidayMap, schoolHolidayMap, vacationDays, vacationMode, profile, plan, shiftOverrides, overrideMode, dayChanges, blinkDateISO]);
 
   // ── Loading ──────────────────────────────────────────────────────────────
 
@@ -791,7 +815,7 @@ export default function CalendarScreen() {
               <View style={styles.vacLegendRow}>
                 <View style={[styles.legendDot, { backgroundColor: colors.error }]} />
                 <Text style={styles.legendLabel}>Feiertag</Text>
-                <View style={[styles.legendDot, { backgroundColor: SHIFT_META.U.bg, borderWidth: 1, borderColor: SHIFT_META.U.fg }]} />
+                <View style={[styles.legendDot, { backgroundColor: shiftMeta.U.bg, borderWidth: 1, borderColor: shiftMeta.U.fg }]} />
                 <Text style={styles.legendLabel}>Urlaub</Text>
                 <View style={[styles.legendDot, { backgroundColor: colors.warning }]} />
                 <Text style={styles.legendLabel}>Ändern</Text>
@@ -860,7 +884,9 @@ export default function CalendarScreen() {
             getItemLayout={getItemLayout}
             onMomentumScrollEnd={handleMomentumScrollEnd}
             windowSize={3}
+            initialNumToRender={1}
             maxToRenderPerBatch={3}
+            updateCellsBatchingPeriod={30}
             removeClippedSubviews={false}
             extraData={`${vacationMode}-${vacationDays.size}-${overrideMode}-${Object.keys(shiftOverrides).length}-${Object.keys(dayChanges).length}`}
             style={styles.flatList}
@@ -876,14 +902,20 @@ export default function CalendarScreen() {
       )}
 
       {/* ── Bottom Buttons ──────────────────────────────────────────── */}
-      <View style={styles.bottomButtons}>
-        <TouchableOpacity style={styles.editBtn} onPress={() => router.push('/(shift)/setup')}>
-          <Text style={styles.editBtnText}>Muster bearbeiten</Text>
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.replace('/')}>
-          <Text style={styles.backBtnText}>Zurück zum Start</Text>
-        </TouchableOpacity>
-      </View>
+      <BottomActionBar style={styles.bottomButtons}>
+        <Button
+          label="Muster bearbeiten"
+          onPress={() => router.push('/(shift)/setup')}
+          variant="soft"
+          fullWidth
+        />
+        <Button
+          label="Zurück zum Start"
+          onPress={() => router.replace('/')}
+          variant="subtle"
+          fullWidth
+        />
+      </BottomActionBar>
       </ScrollView>
 
       {/* ── Freizeitkonto-Modal ─────────────────────────────────────── */}
@@ -1165,8 +1197,17 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
 
-  // Holiday Dot
-  holidayDot: { position: 'absolute', bottom: 3, left: 3, width: 6, height: 6, borderRadius: 3, backgroundColor: colors.error },
+  // Holiday indicator (bottom edge only)
+  holidayBottomBar: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    height: 4,
+    backgroundColor: colors.error,
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
+  },
   ghostDot: { position: 'absolute', bottom: 3, right: 3, width: 6, height: 6, borderRadius: 3, backgroundColor: colors.purple },
   // Override Dot
   overrideDot: { position: 'absolute', top: 3, left: 3, width: 6, height: 6, borderRadius: 3, backgroundColor: colors.warning },
@@ -1273,10 +1314,6 @@ const styles = StyleSheet.create({
   taModalDismissText: { fontSize: typography.fontSize.sm, color: colors.textTertiary, textDecorationLine: 'underline' },
 
   // Bottom Buttons
-  bottomButtons: { paddingHorizontal: PAGE_PADDING, paddingBottom: 40, paddingTop: 12, gap: 10 },
-  editBtn: { borderWidth: 1, borderColor: colors.primary, borderRadius: 10, paddingVertical: 13, alignItems: 'center', backgroundColor: colors.primaryBackground },
-  editBtnText: { color: colors.primary, fontSize: 15, fontWeight: '600' },
-  backBtn: { borderRadius: 10, paddingVertical: 13, alignItems: 'center', backgroundColor: colors.backgroundTertiary },
-  backBtnText: { color: colors.textSecondary, fontSize: 15, fontWeight: '600' },
+  bottomButtons: { gap: 10 },
 });
 

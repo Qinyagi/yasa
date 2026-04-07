@@ -9,18 +9,26 @@ import {
   Modal,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   getProfile,
   getSpaces,
   getCurrentSpaceId,
   getAllShiftPlans,
+  saveShiftPlan,
+  setSpaces,
   todayISO,
   listGhosts,
   markGhostPresent,
+  mergeRemoteGhosts,
 } from '../../lib/storage';
+import { pullShiftPlansByProfileIds, pushShiftPlanToBackend } from '../../lib/backend/shiftSync';
+import { pullGhostsForSpace } from '../../lib/backend/ghostSync';
+import { syncTeamSpaces } from '../../lib/backend/teamSync';
+import { useRealtimeMemberSync } from '../../lib/backend/realtimeMembers';
 import { diffDaysUTC, shiftCodeAtDate } from '../../lib/shiftEngine';
 import { MultiavatarView } from '../../components/MultiavatarView';
+import { resolveAvatarSeed } from '../../lib/avatarSeed';
 import type { UserProfile, Space, ShiftType, MemberSnapshot } from '../../types';
 import { colors, typography, spacing, borderRadius, accessibility, SHIFT_META, SHIFT_SEQUENCE } from '../../constants/theme';
 
@@ -36,6 +44,15 @@ interface ColleagueEntry {
 
 export default function TodayScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
+
+  const handleBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(services)');
+  }, [navigation, router]);
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [space, setSpace] = useState<Space | null>(null);
@@ -72,7 +89,20 @@ export default function TodayScreen() {
       return;
     }
 
-    const spaces = await getSpaces();
+    const localSpaces = await getSpaces();
+
+    // Best-effort member sync: pull fresh member list from backend so that
+    // guests who have deleted their profile are removed before we render.
+    // Falls back to local data silently on any network error.
+    let spaces = localSpaces;
+    try {
+      const syncResult = await syncTeamSpaces(p.id, localSpaces);
+      spaces = syncResult.spaces;
+      await setSpaces(spaces);
+    } catch {
+      // best-effort – continue with local data
+    }
+
     const activeSpace = spaces.find((s) => s.id === currentSpaceId) ?? null;
     setSpace(activeSpace);
 
@@ -94,11 +124,42 @@ export default function TodayScreen() {
       setLoading(false);
       return;
     }
+    // ── Ghost pre-load ─────────────────────────────────────────────────────────
+    // Pull remote ghost definitions BEFORE the shift plan pull so ghost IDs are
+    // included in pullShiftPlansByProfileIds. This is the critical step that
+    // enables cross-device ghost presence propagation.
+    let ghosts: UserProfile[] = [];
+    try {
+      const remoteGhosts = await pullGhostsForSpace(currentSpaceId);
+      if (remoteGhosts.length > 0) {
+        await mergeRemoteGhosts(currentSpaceId, remoteGhosts);
+      }
+    } catch {
+      // best-effort — network error: proceed with locally known ghosts only
+    }
+    ghosts = await listGhosts(currentSpaceId);
+    setAvailableGhosts(ghosts);
+
+    let resolvedPlans = allPlans;
+    try {
+      const memberIds = activeSpace.memberProfiles.map((m) => m.id);
+      // Include ghost IDs so their shift plans (presence entries) are pulled too
+      const ghostIds = ghosts.map((g) => g.id);
+      const remotePlans = await pullShiftPlansByProfileIds([...memberIds, ...ghostIds]);
+      if (Object.keys(remotePlans).length > 0) {
+        resolvedPlans = { ...allPlans, ...remotePlans };
+        await Promise.all(
+          Object.values(remotePlans).map((plan) => saveShiftPlan(plan))
+        );
+      }
+    } catch {
+      // Backend-Sync ist best effort; lokale Funktion bleibt erhalten.
+    }
 
     const today = todayISO();
 
     // Eigene heutige Schicht ermitteln
-    const myPlan = allPlans[p.id];
+    const myPlan = resolvedPlans[p.id];
     const myEntry = myPlan?.entries.find((e) => e.dateISO === today);
     const myCode = myEntry?.code ?? null;
     setMyShift(myCode);
@@ -126,7 +187,7 @@ export default function TodayScreen() {
     for (const member of activeSpace.memberProfiles) {
       if (member.id === p.id) continue;
 
-      const memberPlan = allPlans[member.id];
+      const memberPlan = resolvedPlans[member.id];
       if (!memberPlan) {
         withoutPlan++;
         continue;
@@ -147,13 +208,10 @@ export default function TodayScreen() {
     setColleagues(result);
     setNoPlansCount(withoutPlan);
 
-    // Ghosts laden und prüfen welche heute einen Eintrag haben
-    const ghosts = await listGhosts(currentSpaceId);
-    setAvailableGhosts(ghosts);
-
+    // Ghost entries — ghosts already loaded + synced above (ghost pre-load section)
     const ghostEntries: ColleagueEntry[] = [];
     for (const ghost of ghosts) {
-      const ghostPlan = allPlans[ghost.id];
+      const ghostPlan = resolvedPlans[ghost.id];
       if (!ghostPlan) continue;
       const ghostEntry = ghostPlan.entries.find((e) => e.dateISO === today);
       if (ghostEntry) {
@@ -171,6 +229,31 @@ export default function TodayScreen() {
     setGhostsPresent(ghostEntries);
     setLoading(false);
   }, []);
+
+  // Realtime member change listener: triggers lightweight sync when
+  // other devices join/leave the space. Debounced + additive to focus-sync.
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  useRealtimeMemberSync(
+    profile?.id,
+    space ? [space.id] : [],
+    useCallback(async () => {
+      const localSpaces = await getSpaces();
+      const current = localSpaces.find((s) => s.id === space?.id);
+      if (!current || !profile) return;
+      try {
+        const syncResult = await syncTeamSpaces(profile.id, localSpaces);
+        const updated = syncResult.spaces.find((s) => s.id === current.id);
+        if (updated) {
+          await setSpaces(
+            localSpaces.map((s) => (s.id === updated.id ? updated : s))
+          );
+          setSpace(updated);
+        }
+      } catch {
+        // best-effort — focus-sync on next focus event will recover
+      }
+    }, [profile?.id, space?.id])
+  );
 
   useFocusEffect(
     useCallback(() => {
@@ -198,6 +281,18 @@ export default function TodayScreen() {
     try {
       const today = todayISO();
       await markGhostPresent(selectedGhost.id, today, selectedShiftCode);
+
+      // Push ghost plan to backend so other devices see this presence on next sync.
+      // Best-effort: focus-sync convergence is the safety net if push fails.
+      try {
+        const allPlans = await getAllShiftPlans();
+        const ghostPlan = allPlans[selectedGhost.id];
+        if (ghostPlan) {
+          await pushShiftPlanToBackend(ghostPlan);
+        }
+      } catch {
+        // best-effort — focus-sync convergence handles eventual consistency
+      }
 
       // Optimistisches UI Update
       setGhostsPresent((prev) => {
@@ -247,7 +342,7 @@ export default function TodayScreen() {
         <TouchableOpacity style={styles.btn} onPress={() => router.replace('/(auth)/create-profile')}>
           <Text style={styles.btnText}>Profil erstellen</Text>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.backBtn, { marginTop: 12 }]} onPress={() => router.back()}>
+        <TouchableOpacity style={[styles.backBtn, { marginTop: 12 }]} onPress={handleBack}>
           <Text style={styles.backBtnText}>Zurück</Text>
         </TouchableOpacity>
       </View>
@@ -293,13 +388,16 @@ export default function TodayScreen() {
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Mit wem arbeite ich heute?</Text>
+      <Text testID="today-title" style={styles.title}>Mit wem arbeite ich heute?</Text>
       <Text style={styles.dateText}>{todayFormatted}</Text>
       <Text style={styles.spaceHint}>Space: <Text style={styles.spaceName}>{space.name}</Text></Text>
 
       {/* ── Meine Schicht ──────────────────────────────────────────── */}
       <View style={styles.myShiftBox}>
-        <MultiavatarView uri={profile.avatarUrl} size={44} />
+        <MultiavatarView
+          seed={resolveAvatarSeed(profile.id, profile.displayName, profile.avatarUrl)}
+          size={44}
+        />
         <View style={styles.myShiftText}>
           <Text style={styles.myShiftName}>{profile.displayName} (du)</Text>
           {myShift && myMeta ? (
@@ -351,7 +449,10 @@ export default function TodayScreen() {
               const meta = SHIFT_META[code];
               return (
                 <View key={member.id} style={styles.colleagueRow}>
-                  <MultiavatarView uri={member.avatarUrl} size={40} />
+                  <MultiavatarView
+                    seed={resolveAvatarSeed(member.id, member.displayName, member.avatarUrl)}
+                    size={40}
+                  />
                   <Text style={styles.colleagueName}>{member.displayName}</Text>
                   <View style={[styles.shiftBadge, { backgroundColor: meta.bg }]}>
                     <Text style={[styles.shiftCode, { color: meta.fg }]}>{meta.label}</Text>
@@ -391,7 +492,10 @@ export default function TodayScreen() {
             const meta = SHIFT_META[code];
             return (
               <View key={member.id} style={styles.ghostRow}>
-                <MultiavatarView seed={member.avatarUrl} size={40} />
+                <MultiavatarView
+                  seed={resolveAvatarSeed(member.id, member.displayName, member.avatarUrl)}
+                  size={40}
+                />
                 <View style={styles.ghostNameCol}>
                   <Text style={styles.colleagueName}>{member.displayName}</Text>
                   <Text style={styles.ghostTag}>Ghost</Text>
@@ -431,7 +535,7 @@ export default function TodayScreen() {
             <ScrollView style={styles.ghostPickerScroll} nestedScrollEnabled>
               {availableGhosts.map((ghost) => {
                 const isSelected = selectedGhost?.id === ghost.id;
-                const seed = ghost.avatarUrl || `${space.id}:${ghost.ghostLabel}`.toLowerCase();
+                const seed = resolveAvatarSeed(ghost.id, ghost.ghostLabel ?? ghost.displayName, ghost.avatarUrl);
                 return (
                   <TouchableOpacity
                     key={ghost.id}
@@ -511,17 +615,19 @@ export default function TodayScreen() {
       </TouchableOpacity>
 
       <TouchableOpacity
+        testID="today-open-swap"
         style={styles.swapBtn}
-        onPress={() => router.push('/(swap)/index')}
+        onPress={() => router.push('/(swap)')}
       >
         <Text style={styles.swapBtnText}>🔄 Dienst tauschen</Text>
       </TouchableOpacity>
 
       <TouchableOpacity
+        testID="today-back-to-services"
         style={styles.backBtn}
-        onPress={() => router.replace('/(space)/choose')}
+        onPress={handleBack}
       >
-        <Text style={styles.backBtnText}>Zurück zu Spaces</Text>
+        <Text style={styles.backBtnText}>Zurück</Text>
       </TouchableOpacity>
     </ScrollView>
   );

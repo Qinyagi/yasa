@@ -17,17 +17,19 @@ import {
   Animated,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   getProfile,
   generateShiftEntries,
   saveShiftPlan,
   getShiftPlan,
+  getShiftColorOverrides,
   formatDateISO,
   todayISO,
   isValidISODate,
 } from '../../lib/storage';
-import { weekdayIndexUTC, detectSubPattern } from '../../lib/shiftEngine';
+import { weekdayIndexUTC, detectSubPattern, diffDaysUTC } from '../../lib/shiftEngine';
+import { buildShiftMetaWithOverrides } from '../../lib/shiftColors';
 import type { UserProfile, ShiftType, UserShiftPlan } from '../../types';
 
 // ─── Konstanten ────────────────────────────────────────────────────────────────
@@ -36,6 +38,7 @@ const CYCLE_PRESETS = [7, 14, 21, 28] as const;
 const MIN_CYCLE = 1;
 const MAX_CYCLE = 120;
 const REPETITION_OPTIONS = [5, 10, 25, 50, 100] as const;
+const RETRO_WINDOW_DAYS = 365;
 
 // ─── Helper ────────────────────────────────────────────────────────────────────
 
@@ -52,6 +55,13 @@ function weekdayShort(dateISO: string): string {
 
 function clampCycle(n: number): number {
   return Math.max(MIN_CYCLE, Math.min(MAX_CYCLE, Math.round(n)));
+}
+
+function addDaysISO(dateISO: string, days: number): string {
+  const [year, month, day] = dateISO.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  return formatDateISO(date);
 }
 
 // ─── Calendar Helper ──────────────────────────────────────────────────────────
@@ -90,6 +100,14 @@ function getCalendarDays(year: number, month: number): { dateISO: string; inMont
 
 export default function SetupScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
+  const handleBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(services)');
+  }, [navigation, router]);
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -100,14 +118,17 @@ export default function SetupScreen() {
   const [cycleLength, setCycleLength] = useState(100);
   const [cycleLengthInput, setCycleLengthInput] = useState('100');
   const [repetitions, setRepetitions] = useState<number>(10);
+  const [retroFillEnabled, setRetroFillEnabled] = useState(true);
   const [pattern, setPattern] = useState<ShiftType[]>(Array(100).fill('R') as ShiftType[]);
+  const [shiftMeta, setShiftMeta] = useState(SHIFT_META);
 
   // Dirty-Tracking: Ursprungswerte nach letztem Speichern
   const [savedState, setSavedState] = useState<{
     startDate: string;
     cycleLength: number;
-    repetitions: number;
-    pattern: ShiftType[];
+      repetitions: number;
+      retroFillEnabled: boolean;
+      pattern: ShiftType[];
   } | null>(null);
 
   // Button ist deaktiviert wenn keine ungespeicherten Änderungen
@@ -115,6 +136,7 @@ export default function SetupScreen() {
     ? startDate !== savedState.startDate ||
       cycleLength !== savedState.cycleLength ||
       repetitions !== savedState.repetitions ||
+      retroFillEnabled !== savedState.retroFillEnabled ||
       JSON.stringify(pattern.slice(0, cycleLength)) !== JSON.stringify(savedState.pattern.slice(0, savedState.cycleLength))
     : true;
 
@@ -166,9 +188,12 @@ export default function SetupScreen() {
         if (!active) return;
         setProfile(p);
         if (p) {
+          const overrides = await getShiftColorOverrides(p.id);
+          setShiftMeta(buildShiftMetaWithOverrides(overrides));
           const existing = await getShiftPlan(p.id);
           if (existing) {
-            setStartDate(existing.startDateISO);
+            const anchor = existing.anchorDateISO ?? existing.startDateISO;
+            setStartDate(anchor);
             const cl = existing.cycleLengthDays || existing.pattern.length;
             setCycleLength(cl);
             setCycleLengthInput(String(cl));
@@ -180,11 +205,13 @@ export default function SetupScreen() {
               setRepetitions(10);
             }
             setPattern(existing.pattern);
+            setRetroFillEnabled(existing.anchorDateISO ? existing.anchorDateISO !== existing.startDateISO : true);
             // Initialisiere savedState für Dirty-Tracking
             setSavedState({
-              startDate: existing.startDateISO,
+              startDate: anchor,
               cycleLength: cl,
               repetitions: r,
+              retroFillEnabled: existing.anchorDateISO ? existing.anchorDateISO !== existing.startDateISO : true,
               pattern: existing.pattern,
             });
           } else {
@@ -193,6 +220,7 @@ export default function SetupScreen() {
             setCycleLengthInput('100');
             setPattern(Array(100).fill('R') as ShiftType[]);
             setRepetitions(10);
+            setRetroFillEnabled(true);
           }
         }
         setPreview(null);
@@ -315,11 +343,28 @@ export default function SetupScreen() {
     setSaving(true);
     try {
       const patternSlice = pattern.slice(0, cycleLength);
-      const entries = generateShiftEntries(startDate, patternSlice, repetitions);
+      const retroWindowStart = addDaysISO(todayISO(), -RETRO_WINDOW_DAYS);
+      let effectiveStartISO = startDate;
+      if (retroFillEnabled && cycleLength > 0) {
+        const backSpan = Math.max(0, diffDaysUTC(retroWindowStart, startDate));
+        if (backSpan > 0) {
+          const cyclesBack = Math.ceil(backSpan / cycleLength);
+          effectiveStartISO = addDaysISO(startDate, -(cyclesBack * cycleLength));
+        }
+      }
+      const forwardEndISO = addDaysISO(startDate, repetitions * 7 - 1);
+      const totalDays = Math.max(
+        repetitions * 7,
+        diffDaysUTC(effectiveStartISO, forwardEndISO) + 1
+      );
+      const weeksNeeded = Math.ceil(totalDays / 7);
+      const entries = generateShiftEntries(effectiveStartISO, patternSlice, weeksNeeded)
+        .filter((entry) => entry.dateISO <= forwardEndISO);
       const untilDate = entries.length > 0 ? entries[entries.length - 1].dateISO : startDate;
       const plan: UserShiftPlan = {
         profileId: profile.id,
-        startDateISO: startDate,
+        startDateISO: effectiveStartISO,
+        anchorDateISO: startDate,
         pattern: patternSlice,
         cycleLengthDays: cycleLength,
         generatedUntilISO: untilDate,
@@ -331,6 +376,7 @@ export default function SetupScreen() {
       startDate,
       cycleLength,
       repetitions,
+      retroFillEnabled,
       pattern: patternSlice,
     });
     router.replace('/(shift)/calendar');
@@ -463,7 +509,7 @@ export default function SetupScreen() {
         <Text style={styles.sectionLabel}>Legende</Text>
         <View style={styles.legendGrid}>
           {SHIFT_SEQUENCE.map((code) => {
-            const meta = SHIFT_META[code];
+            const meta = shiftMeta[code];
             return (
               <View key={code} style={styles.legendItem}>
                 <View style={[styles.legendBadge, { backgroundColor: meta.bg }]}>
@@ -514,7 +560,7 @@ export default function SetupScreen() {
               }
 
               const code = patternSlice[patIdx];
-              const meta = SHIFT_META[code];
+              const meta = shiftMeta[code];
               // Blink-Ziel: immer Pattern[0] = die dem Startdatum zugeordnete Zelle.
               // patIdx === 0 liegt in der Spalte des Wochentags von startDate.
               const showPulse = patIdx === 0 && showBlinkEffect;
@@ -569,7 +615,7 @@ export default function SetupScreen() {
               <View style={styles.subPatternExtensionRow}>
                 <Text style={styles.subPatternExtensionLabel}>+ </Text>
                 {subPatternHint.extension.map((code, idx) => {
-                  const meta = SHIFT_META[code];
+                  const meta = shiftMeta[code];
                   return (
                     <View
                       key={`${code}-${idx}`}
@@ -624,6 +670,21 @@ export default function SetupScreen() {
         <Text style={styles.optionHint}>Wiederholung (Mal)</Text>
       </View>
 
+      <View style={styles.section}>
+        <Text style={styles.sectionLabel}>Kalender-Rückblick</Text>
+        <TouchableOpacity
+          style={[styles.retroToggleBtn, retroFillEnabled && styles.retroToggleBtnActive]}
+          onPress={() => setRetroFillEnabled((prev) => !prev)}
+        >
+          <Text style={[styles.retroToggleText, retroFillEnabled && styles.retroToggleTextActive]}>
+            {retroFillEnabled ? 'Aktiv: Muster wird rückwirkend übertragen' : 'Aus: nur ab Startdatum'}
+          </Text>
+        </TouchableOpacity>
+        <Text style={styles.optionHint}>
+          Bei aktivem Modus werden vergangene Tage im Kalender passend zum Zyklus ergänzt.
+        </Text>
+      </View>
+
       {/* ── Vorschau-Button ────────────────────────────────────────── */}
       <TouchableOpacity style={styles.previewBtn} onPress={handlePreview}>
         <Text style={styles.previewBtnText}>Vorschau erzeugen</Text>
@@ -634,7 +695,7 @@ export default function SetupScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionLabel}>Nächste 14 Tage</Text>
           {preview.map((entry) => {
-            const meta = SHIFT_META[entry.code];
+            const meta = shiftMeta[entry.code];
             return (
               <View key={entry.dateISO} style={styles.previewRow}>
                 <Text style={styles.previewWeekday}>{weekdayShort(entry.dateISO)}</Text>
@@ -675,7 +736,7 @@ export default function SetupScreen() {
 
       <TouchableOpacity
         style={styles.backBtn}
-        onPress={() => router.back()}
+        onPress={handleBack}
       >
         <Text style={styles.backBtnText}>Abbrechen</Text>
       </TouchableOpacity>
@@ -909,6 +970,27 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textTertiary,
     marginTop: 6,
+  },
+  retroToggleBtn: {
+    borderWidth: 1,
+    borderColor: colors.grayLight,
+    borderRadius: 10,
+    backgroundColor: colors.backgroundTertiary,
+    paddingHorizontal: 12,
+    paddingVertical: 11,
+  },
+  retroToggleBtnActive: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryBackground,
+  },
+  retroToggleText: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    fontWeight: '500',
+  },
+  retroToggleTextActive: {
+    color: colors.primary,
+    fontWeight: '700',
   },
   optionBtn: {
     flex: 1,

@@ -9,7 +9,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { getProfile, getSpaces, joinSpace, importSpaceFromInvite } from '../../lib/storage';
 import { colors, typography, spacing, borderRadius, accessibility } from '../../constants/theme';
@@ -21,6 +21,8 @@ interface InvitePayload {
   name?: string;
   ownerProfileId?: string;
   ownerDisplayName?: string;
+  /** Avatar-Seed des Hosts – seit R2 im QR-Payload enthalten */
+  ownerAvatarUrl?: string;
   token: string;
 }
 
@@ -47,8 +49,11 @@ function parseInvitePayload(value: string): InvitePayload | null {
     const name = url.searchParams.get('name') ?? undefined;
     const ownerProfileId = url.searchParams.get('ownerId') ?? undefined;
     const ownerDisplayName = url.searchParams.get('ownerName') ?? undefined;
-    
-    return { spaceId, name, ownerProfileId, ownerDisplayName, token };
+    // ownerAvatar seit R2: Avatar-Seed des Hosts direkt im QR-Payload
+    const ownerAvatarRaw = url.searchParams.get('ownerAvatar') ?? undefined;
+    const ownerAvatarUrl = ownerAvatarRaw && ownerAvatarRaw.length > 0 ? ownerAvatarRaw : undefined;
+
+    return { spaceId, name, ownerProfileId, ownerDisplayName, ownerAvatarUrl, token };
   } catch {
     return null;
   }
@@ -58,7 +63,15 @@ function parseInvitePayload(value: string): InvitePayload | null {
 
 export default function JoinScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
   const [permission, requestPermission] = useCameraPermissions();
+  const handleBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(space)/choose');
+  }, [navigation, router]);
 
   // Scanning-Zustand
   const [scanning, setScanning] = useState(true);
@@ -127,7 +140,7 @@ export default function JoinScreen() {
 
     // Prüfe ob neues Format mit Space-Metadaten vorhanden
     const hasFullPayload = pendingPayload.name && pendingPayload.ownerProfileId && pendingPayload.ownerDisplayName;
-    
+
     if (hasFullPayload) {
       // Neues Format: Space lokal importieren
       const result = await importSpaceFromInvite(
@@ -136,6 +149,7 @@ export default function JoinScreen() {
           name: pendingPayload.name!,
           ownerProfileId: pendingPayload.ownerProfileId!,
           ownerDisplayName: pendingPayload.ownerDisplayName!,
+          ownerAvatarUrl: pendingPayload.ownerAvatarUrl,
           inviteToken: pendingPayload.token,
         },
         profile
@@ -149,7 +163,7 @@ export default function JoinScreen() {
         setModalVisible(false);
         Alert.alert('Import fehlgeschlagen', result.reason, [
           { text: 'Erneut scannen', onPress: () => { setScanning(true); lastScan.current = null; } },
-          { text: 'Abbrechen', onPress: () => router.back() },
+          { text: 'Abbrechen', onPress: handleBack },
         ]);
       }
     } else {
@@ -164,7 +178,7 @@ export default function JoinScreen() {
         setModalVisible(false);
         Alert.alert('Beitritt fehlgeschlagen', result.reason, [
           { text: 'Erneut scannen', onPress: () => { setScanning(true); lastScan.current = null; } },
-          { text: 'Abbrechen', onPress: () => router.back() },
+          { text: 'Abbrechen', onPress: handleBack },
         ]);
       }
     }
@@ -200,7 +214,7 @@ export default function JoinScreen() {
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.button, styles.buttonBack]}
-          onPress={() => router.back()}
+          onPress={handleBack}
         >
           <Text style={styles.buttonText}>Zurück</Text>
         </TouchableOpacity>
@@ -246,7 +260,7 @@ export default function JoinScreen() {
         <View style={styles.bottomBar}>
           <TouchableOpacity
             style={styles.cancelButton}
-            onPress={() => router.back()}
+            onPress={handleBack}
           >
             <Text style={styles.cancelButtonText}>Abbrechen</Text>
           </TouchableOpacity>

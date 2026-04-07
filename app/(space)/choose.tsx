@@ -9,8 +9,11 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
-import { getProfile, getSpaces, setCurrentSpaceId } from '../../lib/storage';
+import { getProfile, getSpaces, setCurrentSpaceId, setSpaces as saveSpaces } from '../../lib/storage';
+import { syncTeamSpaces } from '../../lib/backend/teamSync';
+import { useRealtimeMemberSync } from '../../lib/backend/realtimeMembers';
 import { MultiavatarView } from '../../components/MultiavatarView';
+import { resolveAvatarSeed } from '../../lib/avatarSeed';
 import type { UserProfile, Space } from '../../types';
 import { colors, typography, spacing, borderRadius, accessibility } from '../../constants/theme';
 
@@ -18,6 +21,7 @@ export default function ChooseScreen() {
   const router = useRouter();
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   // useFocusEffect: reload bei jedem Screen-Fokus → sofort nach Create sichtbar
@@ -25,10 +29,26 @@ export default function ChooseScreen() {
     useCallback(() => {
       let active = true;
       setLoading(true);
-      Promise.all([getProfile(), getSpaces()]).then(([p, s]) => {
+      Promise.all([getProfile(), getSpaces()]).then(async ([p, s]) => {
         if (active) {
+          let resolvedSpaces = s;
+          if (p) {
+            try {
+              const syncResult = await syncTeamSpaces(p.id, s);
+              resolvedSpaces = syncResult.spaces;
+              await saveSpaces(resolvedSpaces);
+              setSyncMessage(
+                `Team-Sync aktiv: lokal ${syncResult.pushedCount}, backend ${syncResult.pulledCount}`
+              );
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : 'unbekannter Sync-Fehler';
+              setSyncMessage(`Team-Sync eingeschränkt: ${reason}`);
+            }
+          } else {
+            setSyncMessage(null);
+          }
           setProfile(p);
-          setSpaces(s);
+          setSpaces(resolvedSpaces);
           setLoading(false);
         }
       });
@@ -36,6 +56,25 @@ export default function ChooseScreen() {
         active = false;
       };
     }, [])
+  );
+
+  // Realtime member sync: listen to member changes for all spaces
+  // This ensures choose.tsx shows fresh member counts without manual refresh
+  useRealtimeMemberSync(
+    profile?.id,
+    spaces.map((s) => s.id),
+    useCallback(async () => {
+      if (!profile) return;
+      const localSpaces = await getSpaces();
+      try {
+        const syncResult = await syncTeamSpaces(profile.id, localSpaces);
+        const updated = syncResult.spaces;
+        await saveSpaces(updated);
+        setSpaces(updated);
+      } catch {
+        // best-effort — focus-sync on next focus will recover
+      }
+    }, [profile?.id])
   );
 
   if (loading) {
@@ -52,12 +91,16 @@ export default function ChooseScreen() {
       <Text style={styles.title}>Deine Spaces</Text>
       {profile && (
         <View style={styles.profileRow}>
-          <MultiavatarView uri={profile.avatarUrl} size={32} />
+          <MultiavatarView
+            seed={resolveAvatarSeed(profile.id, profile.displayName, profile.avatarUrl)}
+            size={32}
+          />
           <Text style={styles.profileHint}>
             <Text style={styles.profileName}>{profile.displayName}</Text>
           </Text>
         </View>
       )}
+      {syncMessage && <Text style={styles.syncHint}>{syncMessage}</Text>}
 
       {spaces.length === 0 ? (
         // ── Kein Space vorhanden ────────────────────────────────────
@@ -93,7 +136,7 @@ export default function ChooseScreen() {
 
             // Rollenbezeichnung: Owner > CoAdmin > Mitglied > Gast
             const roleLabel = isOwner
-              ? 'Eigentümer'
+              ? 'Host'
               : isCoAdmin
               ? 'CoAdmin'
               : isMember
@@ -113,7 +156,7 @@ export default function ChooseScreen() {
                     <Text style={styles.roleBadgeText}>{roleLabel}</Text>
                   </View>
                   <Text style={styles.spaceOwnerText}>
-                    Erstellt von: {space.ownerDisplayName}
+                    Host: {space.ownerDisplayName}
                   </Text>
                   <Text style={styles.memberCount}>👥 {memberCount}</Text>
                 </View>
@@ -198,6 +241,13 @@ const styles = StyleSheet.create({
   profileHint: {
     fontSize: typography.fontSize.sm,
     color: colors.textSecondary,
+  },
+  syncHint: {
+    width: '100%',
+    fontSize: typography.fontSize.xs,
+    color: colors.textSecondary,
+    marginBottom: spacing.md,
+    textAlign: 'left',
   },
   profileName: {
     color: colors.primary,

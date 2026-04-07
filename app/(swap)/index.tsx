@@ -14,6 +14,8 @@ import {
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { Button } from '../../components/Button';
+import { BottomActionBar } from '../../components/BottomActionBar';
 import {
   getProfile,
   getCurrentSpaceId,
@@ -351,15 +353,13 @@ export default function SwapScreen() {
     <View style={styles.screen}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={handleBackToServices}>
-          <Text style={styles.backBtn}>← Zurück</Text>
-        </TouchableOpacity>
-        <Text style={styles.title}>🔄 Dienst tauschen</Text>
+        <Text testID="swap-title" style={styles.title}>🔄 Dienst tauschen</Text>
       </View>
 
       {/* Tabs */}
       <View style={styles.tabRow}>
         <TouchableOpacity
+          testID="swap-tab-open"
           style={[styles.tab, tab === 'open' && styles.tabActive]}
           onPress={() => setTab('open')}
         >
@@ -368,6 +368,7 @@ export default function SwapScreen() {
           </Text>
         </TouchableOpacity>
         <TouchableOpacity
+          testID="swap-tab-mine"
           style={[styles.tab, tab === 'mine' && styles.tabActive]}
           onPress={() => setTab('mine')}
         >
@@ -544,7 +545,7 @@ export default function SwapScreen() {
                       </View>
                     </View>
                     <Text style={styles.candidateStatus}>
-                      {cand.shiftCode === null ? 'Frei' : cand.shiftCode === 'R' ? 'Ruhe' : 
+                      {cand.shiftCode === null ? 'Frei' : cand.shiftCode === 'R' ? 'Ruhe' :
                        cand.shiftCode === 'U' ? 'Urlaub' : cand.shiftCode === 'X' ? 'Frei' : 'Gebucht'}
                     </Text>
                   </View>
@@ -554,6 +555,15 @@ export default function SwapScreen() {
           }
         />
       )}
+
+      <BottomActionBar style={styles.bottomActionBar}>
+        <Button
+          label="Zurück"
+          onPress={handleBackToServices}
+          variant="primary"
+          fullWidth
+        />
+      </BottomActionBar>
 
       <Modal visible={showCalendar} transparent animationType="fade" onRequestClose={() => setShowCalendar(false)}>
         <Pressable style={styles.modalOverlay} onPress={() => setShowCalendar(false)}>
@@ -641,6 +651,7 @@ export default function SwapScreen() {
           </Pressable>
         </Pressable>
       </Modal>
+
     </View>
   );
 }
@@ -650,7 +661,6 @@ const styles = StyleSheet.create({
   center: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.background },
   
   header: { paddingHorizontal: PAGE_PADDING, marginBottom: 16 },
-  backBtn: { fontSize: 15, color: colors.primary, fontWeight: '600', marginBottom: 12 },
   title: { fontSize: 24, fontWeight: '700', color: colors.textPrimary },
   
   tabRow: { flexDirection: 'row', paddingHorizontal: PAGE_PADDING, marginBottom: 16, gap: 8 },
@@ -659,7 +669,7 @@ const styles = StyleSheet.create({
   tabText: { fontSize: 13, fontWeight: '600', color: colors.textSecondary },
   tabTextActive: { color: colors.textInverse },
   
-  listContent: { paddingHorizontal: PAGE_PADDING, paddingBottom: 32 },
+  listContent: { paddingHorizontal: PAGE_PADDING, paddingBottom: 110 },
   
   emptyBox: { alignItems: 'center', paddingVertical: 40 },
   emptyEmoji: { fontSize: 48, marginBottom: 8 },
@@ -838,5 +848,10 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 14,
     fontWeight: '600',
+  },
+  bottomActionBar: {
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    backgroundColor: colors.background,
   },
 });

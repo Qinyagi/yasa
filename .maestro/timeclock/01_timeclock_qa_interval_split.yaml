@@ -1,0 +1,126 @@
+appId: host.exp.exponent
+---
+# Cleanup to start context
+- runFlow:
+    when:
+      visible:
+        id: today-title
+    commands:
+      - tapOn:
+          id: today-back-to-services
+- runFlow:
+    when:
+      visible:
+        id: swap-back-to-services
+    commands:
+      - tapOn:
+          id: swap-back-to-services
+- runFlow:
+    when:
+      visible:
+        id: services-back-to-start
+    commands:
+      - tapOn:
+          id: services-back-to-start
+
+# If already on Start -> Services -> Timeclock
+- runFlow:
+    when:
+      visible:
+        id: start-services-card
+    commands:
+      - tapOn:
+          id: start-services-card
+      - extendedWaitUntil:
+          visible: Services
+          timeout: 20000
+
+# If already on Services -> Timeclock
+- runFlow:
+    when:
+      visible: Services
+    commands:
+      - scrollUntilVisible:
+          element:
+            id: services-primary-timeclock
+          direction: DOWN
+          timeout: 25000
+      - tapOn:
+          id: services-primary-timeclock
+      - extendedWaitUntil:
+          visible:
+            id: timeclock-title
+          timeout: 20000
+
+# QA Override setup
+- tapOn:
+    id: timeclock-qa-toggle
+- tapOn:
+    id: timeclock-qa-date-input
+- eraseText
+- inputText: "2026-03-24"
+- tapOn:
+    id: timeclock-qa-set-preholiday
+- tapOn:
+    id: timeclock-qa-date-input
+- eraseText
+- inputText: "2026-03-25"
+- tapOn:
+    id: timeclock-qa-set-holiday
+
+# Create check-in and normalize to 21:45
+- tapOn:
+    id: timeclock-eventtype-check_in
+- tapOn:
+    id: timeclock-shift-N
+- tapOn:
+    id: timeclock-stamp-now
+- tapOn: Bearbeiten
+- tapOn:
+    id: timeclock-edit-date-input
+- eraseText
+- inputText: "2026-03-24"
+- tapOn:
+    id: timeclock-edit-time-input
+- eraseText
+- inputText: "2145"
+- tapOn:
+    id: timeclock-edit-eventtype-check_in
+- tapOn:
+    id: timeclock-edit-shift-N
+- tapOn:
+    id: timeclock-edit-save
+
+# Create check-out and normalize to 06:00
+- tapOn:
+    id: timeclock-eventtype-check_out
+- tapOn:
+    id: timeclock-shift-N
+- tapOn:
+    id: timeclock-stamp-now
+- tapOn: Bearbeiten
+- tapOn:
+    id: timeclock-edit-date-input
+- eraseText
+- inputText: "2026-03-24"
+- tapOn:
+    id: timeclock-edit-time-input
+- eraseText
+- inputText: "0600"
+- tapOn:
+    id: timeclock-edit-eventtype-check_out
+- tapOn:
+    id: timeclock-edit-shift-N
+- tapOn:
+    id: timeclock-edit-save
+
+# Verify monthly credited split and total are visible
+- scrollUntilVisible:
+    element:
+      id: timeclock-month-credited-split
+    direction: UP
+    timeout: 20000
+- assertVisible:
+    id: timeclock-month-credited-split
+- assertVisible:
+    id: timeclock-month-credited-total

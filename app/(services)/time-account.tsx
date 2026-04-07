@@ -9,28 +9,46 @@ import {
   ScrollView, Switch, ActivityIndicator, Alert, Linking,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   getProfile, getSpaces, getCurrentSpaceId,
   getSpaceRuleProfile, getUserTimeAccountProfile,
+  getTimeClockQaCalendar,
+  getShiftPlan, getTimeClockConfigOrDefault, getTimeClockEvents,
   setUserTimeAccountProfile,
 } from '../../lib/storage';
 import type { UserProfile } from '../../types';
+import type { UserShiftPlan, UserTimeClockConfig, TimeClockEvent } from '../../types';
 import type { SpaceRuleProfile, UserTimeAccountProfile, WorkModel } from '../../types/timeAccount';
 import { WORK_MODEL_LABELS } from '../../types/timeAccount';
+import { computeMonthlyWorkProgress } from '../../lib/timeAccountEngine';
 import { BUNDESLAND_LABELS, isBundeslandSupported } from '../../data/schoolHolidays';
 import type { Bundesland } from '../../data/schoolHolidays';
 import { colors, typography, spacing, borderRadius, accessibility } from '../../constants/theme';
+import { Button } from '../../components/Button';
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function TimeAccountScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
+  const handleBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(services)');
+  }, [navigation, router]);
 
   const [loading,       setLoading]       = useState(true);
   const [saving,        setSaving]        = useState(false);
   const [profile,       setProfile]       = useState<UserProfile | null>(null);
   const [spaceProfile,  setSpaceProfile]  = useState<SpaceRuleProfile | null>(null);
+  const [monthExplanationExpanded, setMonthExplanationExpanded] = useState(false);
+  const [shiftPlan,     setShiftPlan]     = useState<UserShiftPlan | null>(null);
+  const [timeConfig,    setTimeConfig]    = useState<UserTimeClockConfig | null>(null);
+  const [timeEvents,    setTimeEvents]    = useState<TimeClockEvent[]>([]);
+  const [qaOverrides,   setQaOverrides]   = useState<Record<string, 'holiday' | 'preholiday'>>({});
 
   // User-Formular
   const [weeklyHours,        setWeeklyHours]        = useState('38.5');
@@ -53,6 +71,19 @@ export default function TimeAccountScreen() {
         }
 
         if (p) {
+          const [plan, cfg, events] = await Promise.all([
+            getShiftPlan(p.id),
+            getTimeClockConfigOrDefault(p.id),
+            getTimeClockEvents(p.id),
+          ]);
+          const qaMap = await getTimeClockQaCalendar(p.id);
+          if (active) {
+            setShiftPlan(plan);
+            setTimeConfig(cfg);
+            setTimeEvents(events);
+            setQaOverrides(qaMap);
+          }
+
           const ur = await getUserTimeAccountProfile(p.id);
           if (active && ur) {
             setWeeklyHours(String(ur.weeklyHours));
@@ -113,6 +144,15 @@ export default function TimeAccountScreen() {
   const schoolEffective = schoolOverride !== null
     ? schoolOverride
     : (spaceProfile?.schoolHolidaysEnabledByDefault ?? false);
+  const monthlyProgress = computeMonthlyWorkProgress({
+    plan: shiftPlan,
+    config: timeConfig,
+    events: timeEvents,
+    spaceProfile,
+    qaDateOverrides: qaOverrides,
+  });
+  const fmtHours = (value: number) => `${value.toFixed(2).replace('.', ',')} h`;
+  const fmtSignedHours = (value: number) => `${value > 0 ? '+' : value < 0 ? '-' : ''}${Math.abs(value).toFixed(2).replace('.', ',')} h`;
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -125,6 +165,86 @@ export default function TimeAccountScreen() {
         <Text style={styles.disclaimerText}>
           ℹ️ Alle Angaben sind technische Prognosen – kein Rechtsanspruch.
         </Text>
+      </View>
+
+      <Text style={styles.sectionTitle}>Monatsfortschritt ({monthlyProgress.monthLabel})</Text>
+      <View style={styles.ruleCard}>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Soll bisher</Text>
+          <Text style={styles.ruleVal}>{fmtHours(monthlyProgress.plannedHoursToDate)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Ist bisher</Text>
+          <Text style={styles.ruleVal}>{fmtHours(monthlyProgress.workedHoursToDate)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Delta bisher</Text>
+          <Text
+            style={[
+              styles.ruleVal,
+              monthlyProgress.deltaHoursToDate > 0
+                ? styles.deltaPositive
+                : monthlyProgress.deltaHoursToDate < 0
+                  ? styles.deltaNegative
+                  : null,
+            ]}
+          >
+            {fmtSignedHours(monthlyProgress.deltaHoursToDate)}
+          </Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Monatssoll</Text>
+          <Text style={styles.ruleVal}>{fmtHours(monthlyProgress.plannedHoursMonth)}</Text>
+        </View>
+        <View style={styles.ruleDivider} />
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Tarifgutschrift bisher</Text>
+          <Text style={styles.ruleVal}>{fmtHours(monthlyProgress.creditedHoursToDate)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>davon Feiertag</Text>
+          <Text style={styles.ruleVal}>{fmtHours(monthlyProgress.creditedHolidayHoursToDate)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>davon Vorfest</Text>
+          <Text style={styles.ruleVal}>{fmtHours(monthlyProgress.creditedPreHolidayHoursToDate)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Gleitzeit angerechnet (Regel)</Text>
+          <Text style={styles.ruleVal}>{fmtHours(monthlyProgress.creditedFlexHoursToDate)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Gesamtdelta inkl. Tarif</Text>
+          <Text
+            style={[
+              styles.ruleVal,
+              monthlyProgress.totalDeltaWithCreditsToDate > 0
+                ? styles.deltaPositive
+                : monthlyProgress.totalDeltaWithCreditsToDate < 0
+                  ? styles.deltaNegative
+                  : null,
+            ]}
+          >
+            {fmtSignedHours(monthlyProgress.totalDeltaWithCreditsToDate)}
+          </Text>
+        </View>
+        <TouchableOpacity
+          style={styles.explanationHeader}
+          onPress={() => setMonthExplanationExpanded((prev) => !prev)}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.ruleKey}>Erklärung anzeigen</Text>
+          <Text style={styles.explanationToggle}>{monthExplanationExpanded ? '▾' : '▸'}</Text>
+        </TouchableOpacity>
+        {monthExplanationExpanded ? (
+          <View style={styles.explanationBox}>
+            {monthlyProgress.explanation.map((line, idx) => (
+              <Text key={`ta-exp-${idx}`} style={styles.explanationText}>
+                {idx + 1}. {line}
+              </Text>
+            ))}
+          </View>
+        ) : null}
       </View>
 
       {/* ── Meine Einstellungen ──────────────────────────────────────── */}
@@ -268,9 +388,13 @@ export default function TimeAccountScreen() {
       )}
 
       {/* Zurück */}
-      <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
-        <Text style={styles.backBtnText}>← Zurück zu Services</Text>
-      </TouchableOpacity>
+      <Button
+        label="Zurück zu Services"
+        onPress={handleBack}
+        variant="subtle"
+        fullWidth
+        style={styles.backBtn}
+      />
     </ScrollView>
   );
 }
@@ -469,6 +593,40 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     color: colors.textPrimary,
     fontWeight: typography.fontWeight.semibold,
+  },
+  deltaPositive: {
+    color: '#166534',
+  },
+  deltaNegative: {
+    color: '#B91C1C',
+  },
+  explanationHeader: {
+    marginTop: spacing.xs,
+    paddingTop: spacing.xs,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  explanationToggle: {
+    fontSize: typography.fontSize.base,
+    color: colors.textSecondary,
+    fontWeight: typography.fontWeight.bold,
+  },
+  explanationBox: {
+    backgroundColor: colors.backgroundTertiary,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    gap: 4,
+    marginTop: spacing.xs,
+  },
+  explanationText: {
+    fontSize: typography.fontSize.xs,
+    color: colors.textSecondary,
+    lineHeight: 18,
   },
   ruleSource: {
     fontSize: typography.fontSize.xs,

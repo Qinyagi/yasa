@@ -7,10 +7,9 @@ import {
   ScrollView,
   Alert,
   ActivityIndicator,
-  Modal,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   getProfile,
   getSpaces,
@@ -20,14 +19,26 @@ import {
   setSpaces,
   STORAGE_KEYS,
 } from '../../lib/storage';
+import { removeSpaceMembershipsForProfile, syncTeamSpaces } from '../../lib/backend/teamSync';
+import { useRealtimeMemberSync } from '../../lib/backend/realtimeMembers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as LocalAuthentication from 'expo-local-authentication';
 import { isBiometricAvailable, authenticateWithBiometrics, getBiometricType } from '../../lib/auth';
 import { MultiavatarView } from '../../components/MultiavatarView';
+import { ResponsiveModal } from '../../components/ResponsiveModal';
 import type { UserProfile, Space } from '../../types';
 import { colors, typography, spacing, borderRadius, accessibility } from '../../constants/theme';
 
 export default function AdminScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
+  const handleBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(services)');
+  }, [navigation, router]);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [spaces, setSpacesState] = useState<Space[]>([]);
   const [loading, setLoading] = useState(true);
@@ -55,8 +66,22 @@ export default function AdminScreen() {
           setBiometricType(type);
 
           if (!available) {
-            setIsAuthenticated(true);
-            setAuthenticating(false);
+            // Biometrics not available/enrolled — fall back to device PIN/password
+            const pinResult = await LocalAuthentication.authenticateAsync({
+              promptMessage: 'Admin-Bereich',
+              disableDeviceFallback: false,
+              cancelLabel: 'Abbrechen',
+            });
+            if (pinResult.success) {
+              setIsAuthenticated(true);
+              setAuthenticating(false);
+            } else {
+              setAuthenticating(false);
+              Alert.alert(
+                'Zugang verweigert',
+                'Für den Admin-Bereich ist eine Geräte-Sperre (PIN, Passwort oder Biometrie) erforderlich.',
+              );
+            }
             return;
           }
 
@@ -84,14 +109,45 @@ export default function AdminScreen() {
       setProfileDeleteStep(0);
 
       Promise.all([getProfile(), getSpaces()]).then(([p, s]) => {
-        if (active) {
+        (async () => {
+          if (!active) return;
           setProfile(p);
-          setSpacesState(s);
+
+          let resolvedSpaces = s;
+          if (p) {
+            try {
+              const syncResult = await syncTeamSpaces(p.id, s);
+              resolvedSpaces = syncResult.spaces;
+              await setSpaces(resolvedSpaces);
+            } catch {
+              // best-effort: continue with local state
+            }
+          }
+
+          if (!active) return;
+          setSpacesState(resolvedSpaces);
           setLoading(false);
-        }
+        })();
       });
       return () => { active = false; };
     }, [isAuthenticated])
+  );
+
+  // Realtime refresh for space membership changes while admin view is open.
+  useRealtimeMemberSync(
+    profile?.id,
+    spaces.map((s) => s.id),
+    useCallback(async () => {
+      if (!profile) return;
+      const localSpaces = await getSpaces();
+      try {
+        const syncResult = await syncTeamSpaces(profile.id, localSpaces);
+        await setSpaces(syncResult.spaces);
+        setSpacesState(syncResult.spaces);
+      } catch {
+        // best-effort
+      }
+    }, [profile?.id])
   );
 
   // ── Space löschen (2-Step: Tap → Confirm Tap) ────────────────────────────
@@ -111,6 +167,19 @@ export default function AdminScreen() {
   // Time-Account-Daten (SpaceRules, UserProfile, UiState)
   async function executeProfileDelete() {
     try {
+      // Best-effort: remove this profile's rows from space_members on the backend
+      // so other devices stop seeing this user in their Shiftpals/member lists.
+      // This is fire-and-forget — local cleanup proceeds regardless of network errors.
+      if (profile) {
+        const currentSpaces = await getSpaces();
+        const spaceIds = currentSpaces.map((s) => s.id);
+        try {
+          await removeSpaceMembershipsForProfile(profile.id, spaceIds);
+        } catch {
+          // Backend delete is best-effort; local delete always proceeds.
+        }
+      }
+
       await setSpaces([]);
       await clearCurrentSpaceId();
       await clearProfile();
@@ -123,6 +192,17 @@ export default function AdminScreen() {
         STORAGE_KEYS.TIME_ACCOUNT_SPACE_RULES,
         STORAGE_KEYS.TIME_ACCOUNT_USER,
         STORAGE_KEYS.TIME_ACCOUNT_UI,
+        STORAGE_KEYS.TIMECLOCK_EVENTS,
+        STORAGE_KEYS.TIMECLOCK_CONFIG,
+        STORAGE_KEYS.TIMECLOCK_TEST_PROMPT,
+        STORAGE_KEYS.TIMECLOCK_UI,
+        STORAGE_KEYS.TIMECLOCK_QA_CALENDAR,
+        STORAGE_KEYS.SHIFT_OVERRIDES,
+        STORAGE_KEYS.DAY_CHANGES,
+        STORAGE_KEYS.VACATION_SHORTSHIFT_REMINDERS,
+        STORAGE_KEYS.STRATEGY_HOURS_BANK,
+        STORAGE_KEYS.STRATEGY_HOURS_JOURNAL,
+        STORAGE_KEYS.SHIFT_COLOR_OVERRIDES,
       ]);
       setShowProfileDeleteModal(false);
       setProfileDeleteStep(0);
@@ -161,7 +241,7 @@ export default function AdminScreen() {
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.button, styles.buttonSecondary]}
-          onPress={() => router.back()}
+          onPress={handleBack}
         >
           <Text style={styles.buttonText}>Zurück</Text>
         </TouchableOpacity>
@@ -194,7 +274,7 @@ export default function AdminScreen() {
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.button, styles.buttonSecondary]}
-          onPress={() => router.back()}
+          onPress={handleBack}
         >
           <Text style={styles.buttonText}>Zurück</Text>
         </TouchableOpacity>
@@ -228,6 +308,7 @@ export default function AdminScreen() {
           const isCoAdmin = space.coAdminProfileIds.includes(profileId);
           const canSeeQR = isOwner || isCoAdmin;
           const confirmingThisSpace = deleteConfirm === space.id;
+          const removedCount = (space.memberHistory ?? []).filter((h) => h.active === false).length;
 
           return (
             <View key={space.id} style={styles.spaceCard}>
@@ -235,12 +316,17 @@ export default function AdminScreen() {
                 <Text style={styles.spaceName}>{space.name}</Text>
                 <Text style={styles.memberCount}>👥 {space.memberProfileIds.length}</Text>
               </View>
+              {removedCount > 0 && (
+                <Text style={styles.historyHint}>
+                  Verlauf: {removedCount} ausgetreten
+                </Text>
+              )}
 
               {/* Role Badge */}
               <View style={styles.roleRow}>
                 <View style={[styles.roleBadge, isOwner ? styles.roleOwner : isCoAdmin ? styles.roleCoAdmin : styles.roleMember]}>
                   <Text style={styles.roleBadgeText}>
-                    {isOwner ? 'Eigentümer' : isCoAdmin ? 'CoAdmin' : 'Mitglied'}
+                    {isOwner ? 'Host' : isCoAdmin ? 'CoAdmin' : 'Member'}
                   </Text>
                 </View>
               </View>
@@ -305,6 +391,26 @@ export default function AdminScreen() {
       {/* ── Profil löschen Section ──────────────────────────────────── */}
       <Text style={styles.sectionTitle}>⚙️ Profil verwalten</Text>
 
+      <View style={styles.profileEditCard}>
+        <Text style={styles.profileEditTitle}>🪪 Profil einmalig bearbeiten</Text>
+        <Text style={styles.profileEditDesc}>
+          Name und Avatar können genau einmal geändert werden. Danach bleibt das Profil gesperrt,
+          damit die Team-Identifikation stabil bleibt.
+        </Text>
+        <TouchableOpacity
+          style={[
+            styles.profileEditBtn,
+            profile.profileEditLocked && styles.profileEditBtnDisabled,
+          ]}
+          onPress={() => router.push('/(admin)/edit-profile')}
+          disabled={profile.profileEditLocked}
+        >
+          <Text style={[styles.profileEditBtnText, profile.profileEditLocked && styles.profileEditBtnTextDisabled]}>
+            {profile.profileEditLocked ? 'Bearbeitung gesperrt' : 'Profil bearbeiten'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+
       <View style={styles.dangerZone}>
         <Text style={styles.dangerZoneLabel}>⚠️ Gefahrenzone</Text>
         <Text style={styles.dangerZoneDesc}>
@@ -320,21 +426,19 @@ export default function AdminScreen() {
 
       {/* Back Button */}
       <TouchableOpacity
+        testID="admin-back"
         style={[styles.button, styles.buttonBack]}
-        onPress={() => router.back()}
+        onPress={handleBack}
       >
         <Text style={styles.buttonBackText}>← Zurück</Text>
       </TouchableOpacity>
 
       {/* ── Profil-Löschen-Modal (3-Step Safetylock) ────────────────── */}
-      <Modal
+      <ResponsiveModal
         visible={showProfileDeleteModal}
-        transparent
-        animationType="fade"
         onRequestClose={() => { setShowProfileDeleteModal(false); setProfileDeleteStep(0); }}
+        contentStyle={styles.modalCard}
       >
-        <View style={styles.modalBackdrop}>
-          <View style={styles.modalCard}>
             {profileDeleteStep === 0 && (
               <>
                 <Text style={styles.modalTitle}>Profil löschen?</Text>
@@ -395,9 +499,7 @@ export default function AdminScreen() {
                 </View>
               </>
             )}
-          </View>
-        </View>
-      </Modal>
+      </ResponsiveModal>
     </ScrollView>
   );
 }
@@ -474,6 +576,12 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     color: colors.textSecondary,
   },
+  historyHint: {
+    fontSize: typography.fontSize.xs,
+    color: colors.error,
+    marginBottom: spacing.sm,
+    fontWeight: typography.fontWeight.semibold,
+  },
   roleRow: {
     flexDirection: 'row',
     marginBottom: spacing.md,
@@ -485,7 +593,7 @@ const styles = StyleSheet.create({
   },
   roleOwner: { backgroundColor: colors.primary },
   roleCoAdmin: { backgroundColor: colors.purple },
-  roleMember: { backgroundColor: colors.secondary },
+  roleMember: { backgroundColor: '#16A34A' },
   roleBadgeText: {
     color: colors.textInverse,
     fontSize: typography.fontSize.xs,
@@ -539,6 +647,45 @@ const styles = StyleSheet.create({
     marginBottom: spacing.md,
     borderWidth: 1,
     borderColor: colors.errorLight,
+  },
+  profileEditCard: {
+    width: '100%',
+    backgroundColor: colors.backgroundSecondary,
+    borderRadius: borderRadius.xl,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  profileEditTitle: {
+    fontSize: typography.fontSize.base,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  profileEditDesc: {
+    fontSize: typography.fontSize.sm,
+    color: colors.textSecondary,
+    lineHeight: 20,
+    marginBottom: spacing.md,
+  },
+  profileEditBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: borderRadius.lg,
+    minHeight: 48,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  profileEditBtnDisabled: {
+    backgroundColor: colors.backgroundTertiary,
+  },
+  profileEditBtnText: {
+    color: colors.textInverse,
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+  },
+  profileEditBtnTextDisabled: {
+    color: colors.textSecondary,
   },
   dangerZoneLabel: {
     fontSize: typography.fontSize.sm,
@@ -612,13 +759,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
   },
   // Modal
-  modalBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: spacing.lg,
-  },
   modalCard: {
     backgroundColor: colors.background,
     borderRadius: 16,

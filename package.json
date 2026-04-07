@@ -3,8 +3,13 @@
   "version": "1.0.0",
   "main": "expo-router/entry",
   "scripts": {
+    "ops:checkpoint": "powershell -ExecutionPolicy Bypass -File scripts/ops/save_session_checkpoint.ps1",
+    "ops:resume": "powershell -ExecutionPolicy Bypass -File scripts/ops/resume_session.ps1",
+    "ops:install-autocheckpoint": "powershell -ExecutionPolicy Bypass -File scripts/ops/install_session_automation.ps1",
     "typecheck": "tsc --noEmit",
-    "test": "sucrase-node lib/__tests__/shiftEngine.test.ts",
+    "test": "sucrase-node lib/__tests__/shiftEngine.test.ts && sucrase-node lib/__tests__/timeclock.test.ts && sucrase-node lib/__tests__/strategyEngine.test.ts && sucrase-node lib/__tests__/timeAccountEngine.test.ts && sucrase-node lib/__tests__/avatarSeed.test.ts && sucrase-node lib/__tests__/memberSync.test.ts && sucrase-node lib/__tests__/realtimeMembers.test.ts && sucrase-node lib/__tests__/ghostPresenceSync.test.ts",
+    "qa:e2e:navigation": "powershell -ExecutionPolicy Bypass -File scripts/qa/run_maestro_navigation.ps1",
+    "qa:e2e:timeclock": "powershell -ExecutionPolicy Bypass -File scripts/qa/run_maestro_timeclock.ps1",
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
@@ -13,6 +18,8 @@
   "dependencies": {
     "@multiavatar/multiavatar": "^1.0.7",
     "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-community/slider": "5.0.1",
+    "@supabase/supabase-js": "^2.99.3",
     "expo": "~54.0.33",
     "expo-camera": "~17.0.10",
     "expo-constants": "~18.0.13",

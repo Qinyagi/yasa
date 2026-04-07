@@ -3,6 +3,7 @@
 
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Image } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { useEffect, useState } from 'react';
 import { getOfferById, affiliateService, isValidAffiliateLink } from '../../../services/affiliate';
 import { AffiliateOffer } from '../../../types/affiliate';
@@ -10,8 +11,16 @@ import { AffiliateOffer } from '../../../types/affiliate';
 export default function OfferDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const navigation = useNavigation();
   const [offer, setOffer] = useState<AffiliateOffer | null>(null);
   const [loading, setLoading] = useState(true);
+  const handleBack = () => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(affiliate)');
+  };
 
   useEffect(() => {
     if (id) {
@@ -73,7 +82,7 @@ export default function OfferDetailScreen() {
         </View>
         <TouchableOpacity 
           style={styles.backButton}
-          onPress={() => router.back()}
+          onPress={handleBack}
         >
           <Text style={styles.backButtonText}>← Zurück zur Übersicht</Text>
         </TouchableOpacity>

@@ -119,7 +119,7 @@ export default function QuestionnaireScreen() {
   const handleFinish = () => {
     // Navigate back to index with result as params
     const resultJson = encodeURIComponent(JSON.stringify(result));
-    router.replace(`(affiliate)?result=${resultJson}`);
+    router.replace(`/(affiliate)?result=${resultJson}`);
   };
 
   const getInterestLabel = (id: string) => {

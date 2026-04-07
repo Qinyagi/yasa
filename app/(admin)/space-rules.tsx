@@ -9,7 +9,7 @@ import {
   ScrollView, Switch, ActivityIndicator, Alert,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   getProfile, getSpaces, getSpaceRuleProfile, setSpaceRuleProfile,
 } from '../../lib/storage';
@@ -36,7 +36,15 @@ const BRANCHE_OPTIONS = [
 
 export default function SpaceRulesScreen() {
   const router = useRouter();
+  const navigation = useNavigation();
   const { spaceId } = useLocalSearchParams<{ spaceId: string }>();
+  const handleBack = useCallback(() => {
+    if (navigation.canGoBack()) {
+      router.back();
+      return;
+    }
+    router.replace('/(admin)');
+  }, [navigation, router]);
 
   const [loading, setLoading]     = useState(true);
   const [saving,  setSaving]      = useState(false);
@@ -150,7 +158,7 @@ export default function SpaceRulesScreen() {
       <View style={styles.center}>
         <Text style={styles.guardIcon}>⚠️</Text>
         <Text style={styles.guardTitle}>Space nicht gefunden</Text>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
           <Text style={styles.backBtnText}>← Zurück</Text>
         </TouchableOpacity>
       </View>
@@ -165,7 +173,7 @@ export default function SpaceRulesScreen() {
         <Text style={styles.guardDesc}>
           Nur Owner und Co-Admins dürfen das Regelprofil bearbeiten.
         </Text>
-        <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+        <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
           <Text style={styles.backBtnText}>← Zurück</Text>
         </TouchableOpacity>
       </View>
@@ -343,7 +351,7 @@ export default function SpaceRulesScreen() {
         </Text>
       </TouchableOpacity>
 
-      <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+      <TouchableOpacity style={styles.backBtn} onPress={handleBack}>
         <Text style={styles.backBtnText}>← Zurück zum Admin</Text>
       </TouchableOpacity>
     </ScrollView>

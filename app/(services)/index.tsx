@@ -8,8 +8,10 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useFocusEffect } from '@react-navigation/native';
 import { getProfile, getSpaces, getCurrentSpaceId, getOpenSwapRequests } from '../../lib/storage';
+import { checkBackendHealth } from '../../lib/backend/health';
+import { resolveAvatarSeed } from '../../lib/avatarSeed';
 import { MultiavatarView } from '../../components/MultiavatarView';
 import type { UserProfile } from '../../types';
 import { typography, spacing, borderRadius, shadows, warmHuman } from '../../constants/theme';
@@ -55,6 +57,14 @@ const SECONDARY_SERVICES: ServiceItem[] = [
     requiresSpace: true,
   },
   {
+    id: 'space-members',
+    icon: '🧾',
+    title: 'Space-Mitglieder',
+    description: 'Alle Mitglieder, Join-Timeline und Ghosts (nur Ansicht).',
+    route: '/(services)/space-members',
+    requiresSpace: true,
+  },
+  {
     id: 'pattern',
     icon: '📋',
     title: 'Mein Schichtmuster',
@@ -68,6 +78,14 @@ const SECONDARY_SERVICES: ServiceItem[] = [
     title: 'Mein Kalender',
     description: 'Dein persönlicher Schichtkalender.',
     route: '/(shift)/calendar',
+    requiresSpace: false,
+  },
+  {
+    id: 'shift-colors',
+    icon: '🎨',
+    title: 'Schichtfarben',
+    description: 'Farben für Schichtcodes individuell einstellen.',
+    route: '/(services)/shift-colors',
     requiresSpace: false,
   },
   {
@@ -88,24 +106,36 @@ const SECONDARY_SERVICES: ServiceItem[] = [
   },
 ];
 
+const TIMECLOCK_SERVICES: ServiceItem[] = [
+  {
+    id: 'timeclock',
+    icon: '⏱️',
+    title: 'Stempeluhr',
+    description: 'Kommen/Gehen erfassen und Stempelzeiten einsehen.',
+    route: '/(services)/timeclock',
+    requiresSpace: false,
+  },
+];
+
 // ─── Component ─────────────────────────────────────────────────────────────
 
 export default function ServicesScreen() {
   const router = useRouter();
-  const navigation = useNavigation();
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [hasSpace, setHasSpace] = useState(false);
   const [openSwapCount, setOpenSwapCount] = useState(0);
+  const [backendHealth, setBackendHealth] = useState<{ ok: boolean; reason?: string } | null>(null);
   const [loading, setLoading] = useState(true);
 
   useFocusEffect(
     useCallback(() => {
       let active = true;
       setLoading(true);
-      Promise.all([getProfile(), getSpaces(), getCurrentSpaceId()]).then(
-        async ([p, spaces, currentId]) => {
+      Promise.all([getProfile(), getSpaces(), getCurrentSpaceId(), checkBackendHealth()]).then(
+        async ([p, spaces, currentId, health]) => {
           if (!active) return;
           setProfile(p);
+          setBackendHealth(health.ok ? { ok: true } : { ok: false, reason: health.reason });
           const activeSpace = currentId ? spaces.find((s) => s.id === currentId) ?? null : null;
           const memberInSpace =
             activeSpace && p
@@ -177,11 +207,7 @@ export default function ServicesScreen() {
   }
 
   function handleBackToStart() {
-    if (navigation.canGoBack()) {
-      router.back();
-      return;
-    }
-    router.replace('/');
+    router.replace('/start');
   }
 
   return (
@@ -190,10 +216,24 @@ export default function ServicesScreen() {
       <View style={styles.header}>
         <Text style={styles.title}>Services</Text>
         <View style={styles.profileRow}>
-          <MultiavatarView uri={profile.avatarUrl} size={28} />
+          <MultiavatarView
+            seed={resolveAvatarSeed(profile.id, profile.displayName, profile.avatarUrl)}
+            size={28}
+          />
           <Text style={styles.profileName}>{profile.displayName}</Text>
         </View>
       </View>
+
+      {backendHealth && (
+        <View style={[styles.backendStatusCard, backendHealth.ok ? styles.backendOk : styles.backendFail]}>
+          <Text style={styles.backendStatusTitle}>
+            {backendHealth.ok ? 'Backend verbunden' : 'Backend nicht erreichbar'}
+          </Text>
+          {!backendHealth.ok && backendHealth.reason && (
+            <Text style={styles.backendStatusDesc}>{backendHealth.reason}</Text>
+          )}
+        </View>
+      )}
 
       {/* Space-Hinweis wenn keiner vorhanden */}
       {!hasSpace && (
@@ -214,6 +254,32 @@ export default function ServicesScreen() {
         </View>
       )}
 
+      {/* ── Time Clock Zone ─────────────────────────────────────────────── */}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionLabel}>Zeiterfassung</Text>
+      </View>
+
+      <View style={styles.primaryServices}>
+        {TIMECLOCK_SERVICES.map((service) => (
+          <TouchableOpacity
+            key={service.id}
+            testID={`services-primary-${service.id}`}
+            style={styles.primaryServiceCard}
+            onPress={() => handleOpenService(service)}
+            activeOpacity={0.85}
+          >
+            <View style={styles.primaryServiceContent}>
+              <Text style={styles.primaryServiceIcon}>{service.icon}</Text>
+              <View style={styles.primaryServiceInfo}>
+                <Text style={styles.primaryServiceTitle}>{service.title}</Text>
+                <Text style={styles.primaryServiceDesc}>{service.description}</Text>
+              </View>
+            </View>
+            <Text style={styles.primaryServiceArrow}>→</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
       {/* ── Primary Services Zone ────────────────────────────────────────── */}
       <View style={styles.sectionHeader}>
         <Text style={styles.sectionLabel}>Produktivität</Text>
@@ -223,6 +289,7 @@ export default function ServicesScreen() {
         {PRIMARY_SERVICES.map((service) => (
           <TouchableOpacity
             key={service.id}
+            testID={`services-primary-${service.id}`}
             style={styles.primaryServiceCard}
             onPress={() => handleOpenService(service)}
             activeOpacity={0.85}
@@ -250,6 +317,7 @@ export default function ServicesScreen() {
           return (
             <TouchableOpacity
               key={service.id}
+              testID={`services-secondary-${service.id}`}
               style={[styles.secondaryServiceCard, isDisabled && styles.secondaryServiceCardDisabled]}
               onPress={() => handleOpenService(service)}
               activeOpacity={0.7}
@@ -286,49 +354,56 @@ export default function ServicesScreen() {
       </View>
 
       <View style={styles.vacationCard}>
-        <View style={styles.vacationCardBanner}>
-          <Text style={styles.vacationEmojis}>🌴 🏖️ ✈️</Text>
+        <View style={styles.vacationHeaderRow}>
+          <Text style={styles.vacationEyebrow}>Zeit für dich</Text>
           <View style={styles.vacationBadge}>
             <Text style={styles.vacationBadgeText}>Top-Feature</Text>
           </View>
         </View>
-        <View style={styles.vacationCardBody}>
-          <Text style={styles.vacationCardTitle}>Ab in den Urlaub</Text>
-          <Text style={styles.vacationCardDesc}>
-            Urlaub planen, Reiseziel aussuchen und direkt buchen – alles in YASA.
-          </Text>
-          <View style={styles.vacationActions}>
-            <TouchableOpacity
-              style={styles.vacationPrimaryBtn}
-              onPress={() => router.push('/(shift)/vacation')}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.vacationPrimaryBtnText}>Urlaub planen →</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.vacationSecondaryBtn}
-              onPress={() => router.push('/(affiliate)')}
-              activeOpacity={0.85}
-            >
-              <Text style={styles.vacationSecondaryBtnText}>🎁 Reisen</Text>
-            </TouchableOpacity>
+        <Text style={styles.vacationCardTitle}>Ab in den Urlaub</Text>
+        <Text style={styles.vacationCardDesc}>
+          Plane deine Auszeit smart, finde passende Angebote und starte direkt aus YASA.
+        </Text>
+        <View style={styles.vacationPills}>
+          <View style={styles.vacationPill}>
+            <Text style={styles.vacationPillText}>🌴 Planung</Text>
+          </View>
+          <View style={styles.vacationPill}>
+            <Text style={styles.vacationPillText}>🏖️ Erholung</Text>
+          </View>
+          <View style={styles.vacationPill}>
+            <Text style={styles.vacationPillText}>✈️ Inspiration</Text>
           </View>
         </View>
-        <View style={styles.vacationNote}>
-          <Text style={styles.vacationNoteText}>
-            Reisen & Freizeit ist direkt in deinem Urlaubsbereich integriert.
-          </Text>
+        <View style={styles.vacationActions}>
+          <TouchableOpacity
+            style={styles.vacationPrimaryBtn}
+            onPress={() => router.push('/(shift)/vacation')}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.vacationPrimaryBtnText}>Urlaub planen</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.vacationSecondaryBtn}
+            onPress={() => router.push('/(affiliate)')}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.vacationSecondaryBtnText}>Angebote entdecken</Text>
+          </TouchableOpacity>
         </View>
+        <Text style={styles.vacationNoteText}>
+          Reisen & Freizeit ist direkt im Urlaubsbereich integriert.
+        </Text>
       </View>
 
       {/* ── Back Button ────────────────────────────────────────────────── */}
-      <TouchableOpacity
-        style={styles.backButton}
+      <Button
+        label="Zurück zum Start"
         onPress={handleBackToStart}
-        activeOpacity={0.7}
-      >
-        <Text style={styles.backButtonText}>← Zurück</Text>
-      </TouchableOpacity>
+        variant="subtle"
+        fullWidth
+        style={styles.backButton}
+      />
     </ScrollView>
   );
 }
@@ -368,6 +443,30 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     color: warmHuman.textSecondary,
     fontWeight: typography.fontWeight.medium,
+  },
+  backendStatusCard: {
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.lg,
+    borderWidth: 1,
+  },
+  backendOk: {
+    backgroundColor: warmHuman.primaryLight,
+    borderColor: warmHuman.primary,
+  },
+  backendFail: {
+    backgroundColor: warmHuman.accentLight,
+    borderColor: warmHuman.accent,
+  },
+  backendStatusTitle: {
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+    color: warmHuman.ink,
+  },
+  backendStatusDesc: {
+    marginTop: 4,
+    fontSize: typography.fontSize.xs,
+    color: warmHuman.textSecondary,
   },
   // Section Headers
   sectionHeader: {
@@ -539,26 +638,28 @@ const styles = StyleSheet.create({
   },
   // Vacation Card (Premium)
   vacationCard: {
-    borderRadius: borderRadius['2xl'],
+    backgroundColor: warmHuman.surfaceCard,
+    borderRadius: borderRadius.xl,
+    padding: spacing.lg,
     marginBottom: spacing.lg,
-    overflow: 'hidden',
-    borderWidth: 2,
-    borderColor: warmHuman.primary,
+    borderWidth: 1,
+    borderColor: warmHuman.borderLight,
+    ...shadows.md,
   },
-  vacationCardBanner: {
-    backgroundColor: warmHuman.primary,
-    paddingVertical: spacing.lg,
-    paddingHorizontal: spacing.md,
+  vacationHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
     alignItems: 'center',
+    marginBottom: spacing.sm,
   },
-  vacationEmojis: {
-    fontSize: 36,
-    letterSpacing: 4,
+  vacationEyebrow: {
+    fontSize: typography.fontSize.xs,
+    color: warmHuman.textMuted,
+    textTransform: 'uppercase',
+    letterSpacing: 1,
+    fontWeight: typography.fontWeight.medium,
   },
   vacationBadge: {
-    position: 'absolute',
-    top: spacing.sm,
-    right: spacing.sm,
     backgroundColor: warmHuman.accent,
     borderRadius: borderRadius.full,
     paddingVertical: 4,
@@ -568,10 +669,6 @@ const styles = StyleSheet.create({
     color: warmHuman.ink,
     fontSize: typography.fontSize.xs,
     fontWeight: typography.fontWeight.bold,
-  },
-  vacationCardBody: {
-    backgroundColor: warmHuman.surfaceCard,
-    padding: spacing.md,
   },
   vacationCardTitle: {
     fontSize: typography.fontSize.xl,
@@ -585,8 +682,28 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     marginBottom: spacing.md,
   },
+  vacationPills: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  vacationPill: {
+    backgroundColor: warmHuman.surfaceWarm,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: warmHuman.borderLight,
+    paddingVertical: 6,
+    paddingHorizontal: spacing.sm,
+  },
+  vacationPillText: {
+    fontSize: typography.fontSize.xs,
+    color: warmHuman.ink,
+    fontWeight: typography.fontWeight.medium,
+  },
   vacationActions: {
     gap: spacing.sm,
+    marginBottom: spacing.sm,
   },
   vacationPrimaryBtn: {
     backgroundColor: warmHuman.primary,
@@ -612,11 +729,6 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.base,
     fontWeight: typography.fontWeight.medium,
   },
-  vacationNote: {
-    paddingTop: spacing.sm,
-    borderTopWidth: 1,
-    borderTopColor: warmHuman.borderLight,
-  },
   vacationNoteText: {
     fontSize: typography.fontSize.xs,
     color: warmHuman.textMuted,
@@ -624,14 +736,8 @@ const styles = StyleSheet.create({
   },
   // Back Button
   backButton: {
-    alignItems: 'center',
     paddingVertical: spacing.md,
     marginTop: spacing.md,
-  },
-  backButtonText: {
-    fontSize: typography.fontSize.base,
-    color: warmHuman.textSecondary,
-    fontWeight: typography.fontWeight.medium,
   },
   // Guard Styles
   guardIcon: {

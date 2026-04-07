@@ -14,7 +14,12 @@
       "backgroundColor": "#ffffff"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "bundleIdentifier": "com.bonitox.yasa",
+      "infoPlist": {
+        "NSCameraUsageDescription": "YASA verwendet die Kamera zum Scannen von QR-Codes für den Workspace-Beitritt.",
+        "NSFaceIDUsageDescription": "YASA verwendet Face ID zum Schutz des Admin-Bereichs."
+      }
     },
     "android": {
       "package": "com.bonitox.yasa",
@@ -32,11 +37,16 @@
       "expo-router"
     ],
     "extra": {
-      "router": {},
-      "eas": {
-        "projectId": "56a1de94-acba-4c5b-b00b-8a8eba4c3a95"
-      }
-    },
+  "router": {},
+  "supabase": {
+    "url": "",
+    "anonKey": "",
+    "supabase_note": "Set credentials via EAS Secrets: EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY"
+  },
+  "eas": {
+    "projectId": "56a1de94-acba-4c5b-b00b-8a8eba4c3a95"
+  }
+},
     "owner": "bonitox"
   }
 }
