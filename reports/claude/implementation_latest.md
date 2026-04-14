@@ -1,98 +1,148 @@
-# Implementation Latest – Timeclock Member Parity + Month Backfill
-**Date:** 2026-04-07
-**Status:** COMPLETE — tsc exit 0, 186 tests PASS (3 new B-tests)
+# Implementation Latest – P1 Zeitkonto Card
+**Date:** 2026-04-12
+**Status:** COMPLETE — `tsc` exit 0, `npm test` 210/210 PASS
 
 ---
 
-## Problems Addressed
+## Scope
 
-### 1. Member Parity Bug (Root Cause)
+New **Zeitkonto** card in `app/(services)/timeclock.tsx`, strictly separating:
+- **Foresight (Plan)** — shift-plan projection for remaining month
+- **Ist (abgeleistet)** — earned from completed stamp intervals only
 
-Auto-placeholders appeared for the **Host** but not for the **Member** on the same codebase.
-
-**Root cause in `lib/storage.ts` — `getShiftForDate`:**
-
-```typescript
-// BEFORE (broken for Members):
-const entry = plan.entries.find((e) => e.dateISO === dateISO);
-return entry?.code ?? null;  // ← null when date not in pre-generated entries
-
-// AFTER (correct for all profiles):
-const entry = plan.entries.find((e) => e.dateISO === dateISO);
-if (entry !== undefined) return entry.code;
-return shiftCodeAtDate(plan.startDateISO, plan.pattern, dateISO);  // ← cycle fallback
-```
-
-**Why it affects Members more than Hosts:**
-The `plan.entries` array is a pre-generated window: `generateShiftEntries(effectiveStartISO, pattern, weeks)`.
-When a user saves their plan with `repetitions = 5 or 10`, `generatedUntilISO` is only
-`anchorDate + (repetitions × 7) - 1` days into the future. Months later, dates near
-"today minus N" are beyond `generatedUntilISO` and absent from `entries`.
-
-- **Host**: Often re-saves plan (settings adjustment, pattern tweak) → fresh `entries` covering recent dates ✓
-- **Member**: Sets up plan once, never re-saves → stale `entries` (e.g., only through Feb 2026) → past March/April dates NOT in entries → `getShiftForDate` returns `null` → autoStamp skips silently ✗
-
-**Fix**: `shiftCodeAtDate(plan.startDateISO, plan.pattern, dateISO)` — already imported in `storage.ts` from `shiftEngine.ts` — computes the correct shift code for any date ≥ `startDateISO` via cycle arithmetic, regardless of the pre-generated window. Returns `null` for dates before `startDateISO` (correct).
-
-This fix also improves the start-screen popup detection (`index.tsx`) and all other callers of `getShiftForDate`.
+No mixing of forecast and actual. P0 invariants preserved.
 
 ---
 
-### 2. Current-Month Backfill (Feature Upgrade)
+## New Module: `lib/zeitkontoEngine.ts`
 
-Replaced the fixed 7-day lookback with a **dynamic current-month backfill**:
+Pure function `computeZeitkonto(input) → ZeitkontoData` with:
 
-```
-Before: daysBack = 1 .. AUTOSTAMP_LOOKBACK_DAYS (7)  — fixed 7 days, crosses month boundary
-After:  daysBack = 1 .. (now.getDate() - 1)           — all past days in current month only
-```
-
-Key properties:
-- On the **1st of the month**: `now.getDate() - 1 = 0` → loop never runs → no cross-month bleed
-- Date computation uses `new Date(y, m, now.getDate() - daysBack)` → JS Date handles month-start safely (minimum day = 1)
-- Removed exported `AUTOSTAMP_LOOKBACK_DAYS` constant (no longer meaningful)
-- All other logic unchanged: cutoff, idempotency, `source: 'auto_placeholder'`, editability
-
----
-
-## All Files Changed
-
-| File | Change |
-|------|--------|
-| `lib/storage.ts` | `getShiftForDate`: added `shiftCodeAtDate` fallback after `entries.find` |
-| `lib/autoStamp.ts` | Removed `AUTOSTAMP_LOOKBACK_DAYS`; loop bound changed to `now.getDate() - 1` |
-| `lib/__tests__/timeclock.test.ts` | Removed `AUTOSTAMP_LOOKBACK_DAYS` import + constant test; added B1, B2, B3 |
+| Section | Field | Source | Category |
+|---|---|---|---|
+| Foresight | `plannedHoursMonth` | Shift plan full month | **Plan** |
+| Foresight | `remainingPlannedHours` | Future plan entries | **Plan** |
+| Foresight | `remainingShiftDays` | Count of future entries | **Plan** |
+| Foresight | `projectedEndDelta` | Current delta (assumes future = planned) | **Plan** |
+| Foresight | `projectedRemainingHolidayCredits` | Future holidays × shift hours | **Plan** |
+| Foresight | `projectedRemainingPreHolidayCredits` | Future preholidays × shift hours | **Plan** |
+| Foresight | `projectedEndBalance` | Current + projected credits | **Plan** |
+| Ist | `workedHoursToDate` | Stamp intervals | **Actual** |
+| Ist | `deltaHoursToDate` | worked − planned (strict) | **Actual** |
+| Ist | `creditedHolidayHours` | Holiday stamp credits | **Actual** |
+| Ist | `creditedPreHolidayHours` | Preholiday stamp credits | **Actual** |
+| Ist | `creditedFlexHours` | Paid flex (separate signal) | **Actual** |
+| Ist | `creditedTariffHoursTotal` | Holiday + preholiday | **Actual** |
+| Ist | `balanceToDate` | delta + tariff credits (NOT flex) | **Actual** |
 
 ---
 
-## Validation
+## Card Location
 
-| Check | Result |
-|-------|--------|
-| `npm run typecheck` (tsc --noEmit) | ✅ Exit 0 |
-| `npm test` — all 175 previous tests | ✅ All PASS |
-| `npm test` — 3 new B-tests | ✅ 3/3 PASS |
-| B1: First day of month → 0 events (no cross-month bleed) | ✅ |
-| B2: Mid-month (April 4) → all 3 days (Apr 1-3) stamped, 6 events | ✅ |
-| B3: Member parity — sparse entries (generatedUntilISO=Jan 7) → shiftCodeAtDate fallback → 6 events | ✅ |
-| A1–A8: Existing auto-stamp scenarios | ✅ All PASS |
-| All shift-engine, strategy, avatar, member-sync, ghost tests | ✅ All PASS |
+Between **Monatskonto** and **Letzte Stempelzeiten** in timeclock.tsx.
+
+| Element | File:Line | testID |
+|---|---|---|
+| Card container | `timeclock.tsx:871` | `zeitkonto-card` |
+| Foresight section | `timeclock.tsx:878-954` | `zk-planned-month`, `zk-remaining-planned`, `zk-remaining-days`, `zk-projected-end-delta`, `zk-projected-balance` |
+| Ist section | `timeclock.tsx:956-1027` | `zk-worked`, `zk-delta`, `zk-holiday`, `zk-preholiday`, `zk-flex`, `zk-tariff`, `zk-balance` |
+| Import + memo | `timeclock.tsx:50`, `:292-302` | — |
 
 ---
 
-## Regression Safety
+## P0 Invariants
 
-| Guard | Status |
-|-------|--------|
-| `getShiftForDate` override path | ✅ Unchanged — overrides checked first, fast-path unaffected |
-| Dates before `plan.startDateISO` | ✅ `shiftCodeAtDate` returns null (diff < 0) — same as before |
-| Ghost plans (sparse entries, pattern=[]) | ✅ Empty pattern → `shiftCodeAtDate` returns null → skip |
-| Anomaly / completed phases | ✅ autoStamp still skips both |
-| Duplicate events | ✅ Idempotency via `deriveTimeClockStampState` phase check |
-| Popup detection in `index.tsx` | ✅ Also benefits from `shiftCodeAtDate` fallback (today/yesterday detection more robust) |
+- **delta = worked − planned (strict)** — Z8 test: `deltaHoursToDate = -2`, flex = 1.5, NOT mixed
+- **flex separate** — Z9 test: `balanceToDate = 0` when only flex exists (3.0), not included
+- **credits explicit** — Holiday/preholiday shown as separate rows in both sections
 
-See full archive: `reports/claude/archive/implementation_2026-04-07_timeclock_member_monthfill.md`
+---
 
-Previous fix: `reports/claude/archive/implementation_2026-04-04_timeclock_autostamp.md`
+## Tests: `lib/__tests__/zeitkontoEngine.test.ts` (10 PASS)
+
+Z1 Ist mirrors monthSummary | Z2 remainingPlannedHours | Z3 projectedEndDelta |
+Z4 projected holiday | Z5 projected preholiday | Z6 null safety |
+Z7 projectedEndBalance | Z8 delta strict | Z9 flex separate | Z10 QA override
+
+**Full suite: 210/210 PASS** (37+27+25+10+4+27+32+12+36)
+
+---
+
+## Files Changed
+
+| File | Type |
+|---|---|
+| `lib/zeitkontoEngine.ts` | NEW — pure module |
+| `lib/__tests__/zeitkontoEngine.test.ts` | NEW — 10 tests |
+| `app/(services)/timeclock.tsx` | MODIFIED — import, useMemo, card JSX, 2 styles |
+| `package.json` | MODIFIED — added test to script |
+
+No changes to storage, timeAccountEngine, timeclockCases, autoStamp, routing.
+
+---
+
+Previous: `archive/implementation_2026-04-11_timeclock_p0_consistency_fix.md`
+Archive: `archive/implementation_2026-04-12_zeitkonto_card_p1.md`
+
+READY_FOR_READ_LATEST: YES
+
+---
+
+## Update – 2026-04-14 (Run2 Device Verification)
+
+### Runtime/Install Reality (Android local)
+- Expo Go remains out of flow for this phase.
+- Active validation path is local Android release APK via ADB:
+  - `android\app\build\outputs\apk\release\app-release.apk`
+  - Device B required explicit `Install via USB` allowance.
+- Key runtime mismatch marker from old builds (`TIMECLOCK_BUILD_SIG`) is now **not visible** on Device B after successful reinstall.
+
+### Manual E2E Run2 (Host/Member)
+- Setup:
+  - Device A = Host (new profile + space created)
+  - Device B = Member (new profile + QR join)
+- Join checks:
+  - Host visible on Device B Shiftpals: **PASS**
+  - Avatar correct on Device B: **PASS**
+- Delete propagation checks:
+  - Member profile deleted on Device B
+  - Device A `Space-Mitglieder`: member shown as exited with red banner: **PASS**
+  - Device A `Meine Shiftpals`: deleted member no longer shown as active: **PASS**
+
+### Implementation status after Run2
+- Current sync lifecycle for join/delete is validated on physical dual-device run.
+- No additional code change applied in this checkpoint block; this is runtime verification hardening.
+
+### Next queued engineering tasks
+1. Optional hygiene: prune/compact oversized `docs/ops/session_archive` growth strategy.
+
+READY_FOR_READ_LATEST: YES
+
+---
+
+## Update – 2026-04-14 (Task 1 + Task 2 done)
+
+### Task 1: Stempeluhr consistency ("Unvollständig" after edits) — DONE
+- File: `lib/timeclockCases.ts`
+- Change: Added fallback pairing in `pairCaseEvents(...)`:
+  - If exactly one `check_in` and one `check_out` exist but no segment is formed due to ordering/legacy metadata, a direct pair attempt is performed.
+  - Overnight wrap remains respected (`+24h` when needed).
+- Effect: prevents false `Unvollständig` for valid edited pairs.
+
+### Task 1 test extension — DONE
+- File: `lib/__tests__/timeclockCases.test.ts`
+- Added regression test:
+  - `Fallback pairing: exactly one check_in + one check_out with wrong createdAt order still pairs (overnight)`
+
+### Task 2: Delta vs Flex wording/summaries — DONE
+- File: `app/(services)/timeclock.tsx`
+- Monatskonto labels clarified:
+  - `Delta bisher (Ist - Soll, ohne Gleitzeit)`
+  - `Gleitzeit-Credit (separat, nicht im Delta)`
+  - `Gesamtdelta inkl. Tarif (ohne Gleitzeit)`
+  - Added helper line: `Gleitzeit wird separat geführt und nicht in Delta/Saldo eingemischt.`
+
+### Verification
+- `npm test` → PASS (full suite green).
 
 READY_FOR_READ_LATEST: YES

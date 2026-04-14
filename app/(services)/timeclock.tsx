@@ -48,17 +48,12 @@ import { getHolidayMap, type Holiday } from '../../data/holidays';
 import type { SpaceRuleProfile } from '../../types/timeAccount';
 import { computeMonthlyWorkProgress } from '../../lib/timeAccountEngine';
 import { autoStampMissedShifts } from '../../lib/autoStamp';
+import {
+  buildShiftCases,
+  buildDaySummaries,
+  REGULAR_SHIFT_CODES,
+} from '../../lib/timeclockCases';
 import { typography, spacing, borderRadius, shadows, warmHuman, semantic } from '../../constants/theme';
-
-const REGULAR_SHIFT_CODES: RegularShiftCode[] = ['F', 'S', 'N', 'KS', 'KN', 'T'];
-const SHIFT_SORT_ORDER: Record<RegularShiftCode, number> = {
-  F: 0,
-  S: 1,
-  N: 2,
-  KS: 3,
-  KN: 4,
-  T: 5,
-};
 
 function weekdayLabel(dateISO: string): string {
   const [y, m, d] = dateISO.split('-').map(Number);
@@ -69,19 +64,6 @@ function weekdayLabel(dateISO: string): string {
 function timePart(timestampISO: string): string {
   const date = new Date(timestampISO);
   return date.toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
-}
-
-function minutesForHHMM(input: string): number {
-  const normalized = normalizeToHHMM(input, '00:00');
-  const [h, m] = normalized.split(':').map(Number);
-  return h * 60 + m;
-}
-
-function plannedShiftMinutes(window: { startTime: string; endTime: string }): number {
-  const start = minutesForHHMM(window.startTime);
-  let end = minutesForHHMM(window.endTime);
-  if (end <= start) end += 24 * 60;
-  return end - start;
 }
 
 function formatHoursDecimal(hours: number): string {
@@ -173,131 +155,8 @@ function dateMarkers(
   return markers;
 }
 
-interface ShiftCaseSummary {
-  key: string;
-  dateISO: string;
-  weekday: string;
-  shiftCode: RegularShiftCode;
-  checkIn: string | null;
-  checkOut: string | null;
-  segmentCount: number;
-  hasOpenCheckIn: boolean;
-  orphanCheckOutCount: number;
-  plannedHours: number;
-  workedHours: number | null;
-  flexHours: number | null;
-}
-
-interface DaySummary {
-  dateISO: string;
-  weekday: string;
-  workedHours: number;
-  flexHours: number;
-  completedShiftCount: number;
-}
-
-
-function buildShiftCases(
-  eventList: Awaited<ReturnType<typeof getTimeClockEvents>>,
-  cfg: UserTimeClockConfig | null
-): ShiftCaseSummary[] {
-  if (!cfg) return [];
-  const grouped = new Map<string, Awaited<ReturnType<typeof getTimeClockEvents>>>();
-
-  eventList.forEach((event) => {
-    const key = `${event.dateISO}|${event.shiftCode}`;
-    const existing = grouped.get(key) ?? [];
-    existing.push(event);
-    grouped.set(key, existing);
-  });
-
-  const cases: ShiftCaseSummary[] = [];
-  grouped.forEach((events, key) => {
-    const sorted = [...events].sort((a, b) => {
-      const byCreated = a.createdAt.localeCompare(b.createdAt);
-      if (byCreated !== 0) return byCreated;
-      return a.timestampISO.localeCompare(b.timestampISO);
-    });
-    const firstCheckIn = sorted.find((e) => e.eventType === 'check_in') ?? null;
-    const checkOutCandidates = sorted.filter((e) => e.eventType === 'check_out');
-    const lastCheckOut = checkOutCandidates.length > 0 ? checkOutCandidates[checkOutCandidates.length - 1] : null;
-    const [dateISO, shiftCodeRaw] = key.split('|');
-    const shiftCode = shiftCodeRaw as RegularShiftCode;
-    const plannedMinutes = plannedShiftMinutes(cfg.shiftSettings[shiftCode]);
-
-    let openCheckIn: (typeof sorted)[number] | null = null;
-    let orphanCheckOutCount = 0;
-    let workedMinutes = 0;
-    let segmentCount = 0;
-
-    sorted.forEach((event) => {
-      if (event.eventType === 'check_in') {
-        // Bei doppeltem Kommen ohne Gehen nehmen wir den letzten Start als aktiven Marker.
-        openCheckIn = event;
-        return;
-      }
-      if (!openCheckIn) {
-        orphanCheckOutCount += 1;
-        return;
-      }
-      const diffMinutes = Math.round(
-        (new Date(event.timestampISO).getTime() - new Date(openCheckIn.timestampISO).getTime()) / 60000
-      );
-      if (diffMinutes > 0) {
-        workedMinutes += diffMinutes;
-        segmentCount += 1;
-      }
-      openCheckIn = null;
-    });
-
-    let workedHours: number | null = null;
-    let flexHours: number | null = null;
-    if (segmentCount > 0) {
-      workedHours = workedMinutes / 60;
-      flexHours = (workedMinutes - plannedMinutes) / 60;
-    }
-
-    cases.push({
-      key,
-      dateISO,
-      weekday: firstCheckIn?.weekdayLabel ?? lastCheckOut?.weekdayLabel ?? weekdayLabel(dateISO),
-      shiftCode,
-      checkIn: firstCheckIn?.timestampISO ?? null,
-      checkOut: lastCheckOut?.timestampISO ?? null,
-      segmentCount,
-      hasOpenCheckIn: openCheckIn !== null,
-      orphanCheckOutCount,
-      plannedHours: plannedMinutes / 60,
-      workedHours,
-      flexHours,
-    });
-  });
-
-  return cases.sort((a, b) => {
-    if (a.dateISO !== b.dateISO) return b.dateISO.localeCompare(a.dateISO);
-    return SHIFT_SORT_ORDER[a.shiftCode] - SHIFT_SORT_ORDER[b.shiftCode];
-  });
-}
-
-function buildDaySummaries(shiftCases: ShiftCaseSummary[]): DaySummary[] {
-  const dayMap = new Map<string, DaySummary>();
-  shiftCases.forEach((entry) => {
-    if (entry.workedHours === null || entry.flexHours === null) return;
-    const current = dayMap.get(entry.dateISO) ?? {
-      dateISO: entry.dateISO,
-      weekday: entry.weekday,
-      workedHours: 0,
-      flexHours: 0,
-      completedShiftCount: 0,
-    };
-    current.workedHours += entry.workedHours;
-    current.flexHours += entry.flexHours;
-    current.completedShiftCount += 1;
-    dayMap.set(entry.dateISO, current);
-  });
-
-  return [...dayMap.values()].sort((a, b) => b.dateISO.localeCompare(a.dateISO));
-}
+// ShiftCaseSummary, DaySummary, buildShiftCases, buildDaySummaries,
+// REGULAR_SHIFT_CODES and SHIFT_SORT_ORDER are imported from lib/timeclockCases.
 
 
 export default function TimeClockServiceScreen() {
@@ -670,7 +529,6 @@ export default function TimeClockServiceScreen() {
       <Text style={styles.subtitle}>
         Eigener Service-Bereich für Zeiterfassung. Ereignisse enthalten Datum, Wochentag, Uhrzeit und Schichtkürzel.
       </Text>
-
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Schneller Stempel</Text>
         <View style={styles.chipRow}>
@@ -839,44 +697,6 @@ export default function TimeClockServiceScreen() {
           Kommen und Gehen werden als ein Schichtfall zusammengeführt. Tageswerte basieren auf vorhandenen Paaren.
         </Text>
 
-        {daySummaries.length === 0 ? (
-          <Text style={styles.emptyText}>Noch keine abgeschlossenen Schichten für Tagesbilanz vorhanden.</Text>
-        ) : (
-          daySummaries.map((day) => (
-            <View key={`day-${day.dateISO}`} style={[styles.summaryRow, dateMarkers(day.dateISO, holidayLookup).length > 0 ? styles.highlightRow : null]}>
-              <View style={styles.eventMain}>
-                <Text style={styles.eventType}>
-                  {day.dateISO} · {day.weekday}
-                </Text>
-                {dateMarkers(day.dateISO, holidayLookup).length > 0 && (
-                  <View style={styles.markerRow}>
-                    {dateMarkers(day.dateISO, holidayLookup).map((marker) => (
-                      <View
-                        key={`day-marker-${day.dateISO}-${marker.kind}-${marker.label}`}
-                        style={[styles.markerChip, marker.kind === 'holiday' ? styles.holidayMarkerChip : styles.preholidayMarkerChip]}
-                      >
-                        <Text style={styles.markerChipText}>{marker.label}</Text>
-                      </View>
-                    ))}
-                  </View>
-                )}
-                <Text style={styles.eventMeta}>{day.completedShiftCount} abgeschlossene Schicht(en)</Text>
-              </View>
-              <View style={styles.eventActions}>
-                <Text style={styles.summaryMainValue}>{formatHoursDecimal(day.workedHours)}</Text>
-                <Text
-                  style={[
-                    styles.summaryDeltaValue,
-                    day.flexHours > 0 ? styles.deltaPositive : day.flexHours < 0 ? styles.deltaNegative : null,
-                  ]}
-                >
-                  Gleitzeit {formatSignedHoursDecimal(day.flexHours)}
-                </Text>
-              </View>
-            </View>
-          ))
-        )}
-
         {shiftCases.length === 0 ? (
           <Text style={styles.emptyText}>Noch keine Schichtfälle vorhanden.</Text>
         ) : (
@@ -912,15 +732,20 @@ export default function TimeClockServiceScreen() {
                     <Text
                       style={[
                         styles.summaryDeltaValue,
-                        (entry.flexHours ?? 0) > 0
+                        (entry.deltaHours ?? 0) > 0
                           ? styles.deltaPositive
-                          : (entry.flexHours ?? 0) < 0
+                          : (entry.deltaHours ?? 0) < 0
                             ? styles.deltaNegative
                             : null,
                       ]}
                     >
-                      {formatSignedHoursDecimal(entry.flexHours ?? 0)}
+                      Delta {formatSignedHoursDecimal(entry.deltaHours ?? 0)}
                     </Text>
+                    {(entry.flexCreditHours ?? 0) > 0 && (
+                      <Text style={styles.eventMeta}>
+                        Flex-Credit {formatHoursDecimal(entry.flexCreditHours ?? 0)}
+                      </Text>
+                    )}
                     {(entry.hasOpenCheckIn || entry.orphanCheckOutCount > 0) && (
                       <Text style={styles.warningText}>Teilweise</Text>
                     )}
@@ -948,7 +773,7 @@ export default function TimeClockServiceScreen() {
         </View>
         <View style={styles.summaryRow}>
           <View style={styles.eventMain}>
-            <Text style={styles.eventMeta}>Delta bisher</Text>
+            <Text style={styles.eventMeta}>Delta bisher (Ist - Soll, ohne Gleitzeit)</Text>
             <Text
               style={[
                 styles.summaryMainValue,
@@ -986,13 +811,13 @@ export default function TimeClockServiceScreen() {
         </View>
         <View style={styles.summaryRow}>
           <View style={styles.eventMain}>
-            <Text style={styles.eventMeta}>Gleitzeit angerechnet (Regel)</Text>
+            <Text style={styles.eventMeta}>Gleitzeit-Credit (separat, nicht im Delta)</Text>
             <Text style={styles.summaryMainValue}>{formatHoursDecimal(monthSummary.creditedFlexHoursToDate)}</Text>
           </View>
         </View>
         <View style={styles.summaryRow}>
           <View style={styles.eventMain}>
-            <Text style={styles.eventMeta}>Gesamtdelta inkl. Tarif</Text>
+            <Text style={styles.eventMeta}>Gesamtdelta inkl. Tarif (ohne Gleitzeit)</Text>
             <Text
               style={[
                 styles.summaryMainValue,
@@ -1017,6 +842,9 @@ export default function TimeClockServiceScreen() {
         </TouchableOpacity>
         <Text style={styles.helperText}>
           Hinweis: Bei Nachtdienst vor Feiertag werden Minuten vor 00:00 als Vorfest und ab 00:00 als Feiertag gewertet.
+        </Text>
+        <Text style={styles.helperText}>
+          Regel: Gleitzeit wird separat geführt und nicht in Delta/Saldo eingemischt.
         </Text>
         {monthExplanationExpanded ? (
           <View style={styles.explanationBox}>
