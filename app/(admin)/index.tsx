@@ -154,7 +154,7 @@ export default function AdminScreen() {
     }, [profile?.id])
   );
 
-  // ── Space löschen (2-Step: Tap → Confirm Tap) ────────────────────────────
+  // ── Space löschen / verlassen (2-Step: Tap → Confirm Tap) ────────────────
   async function handleDeleteSpace(spaceId: string) {
     if (deleteConfirm !== spaceId) {
       setDeleteConfirm(spaceId);
@@ -330,6 +330,7 @@ export default function AdminScreen() {
           const canSeeQR = isOwner || isCoAdmin;
           const confirmingThisSpace = deleteConfirm === space.id;
           const isActiveSpace = currentSpaceId === space.id;
+          const canLeaveSpace = isMember && !isOwner;
           const removedCount = (space.memberHistory ?? []).filter((h) => h.active === false).length;
 
           return (
@@ -417,6 +418,23 @@ export default function AdminScreen() {
                     </>
                   )}
                 </View>
+              )}
+
+              {canLeaveSpace && (
+                <TouchableOpacity
+                  style={[
+                    styles.leaveSpaceBtn,
+                    confirmingThisSpace && styles.leaveSpaceBtnConfirm,
+                  ]}
+                  onPress={() => handleDeleteSpace(space.id)}
+                >
+                  <Text style={[
+                    styles.leaveSpaceBtnText,
+                    confirmingThisSpace && styles.leaveSpaceBtnTextConfirm,
+                  ]}>
+                    {confirmingThisSpace ? 'Austritt bestätigen?' : 'Space verlassen'}
+                  </Text>
+                </TouchableOpacity>
               )}
 
               {isOwner && (
@@ -705,6 +723,29 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     fontWeight: typography.fontWeight.semibold,
     textAlign: 'center',
+  },
+  leaveSpaceBtn: {
+    minHeight: 48,
+    borderRadius: borderRadius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.errorLight,
+    marginTop: spacing.md,
+  },
+  leaveSpaceBtnConfirm: {
+    backgroundColor: colors.error,
+    borderColor: colors.error,
+  },
+  leaveSpaceBtnText: {
+    color: colors.error,
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+    textAlign: 'center',
+  },
+  leaveSpaceBtnTextConfirm: {
+    color: colors.textInverse,
   },
   cancelLink: {
     color: colors.textSecondary,

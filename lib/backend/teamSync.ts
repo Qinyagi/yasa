@@ -600,6 +600,15 @@ export async function syncTeamSpaces(
     const mergedHistory = Array.from(historyMap.values());
     const mergedMembers = Array.from(memberMap.values());
     const mergedMemberIds = Array.from(new Set(mergedMembers.map((m) => m.id)));
+    const mergedPreparedIdProfiles =
+      remoteSpace.ownerProfileId === profileId
+        ? localSpace.preparedIdProfiles ?? remoteSpace.preparedIdProfiles ?? []
+        : remoteSpace.preparedIdProfiles ?? localSpace.preparedIdProfiles ?? [];
+
+    if (remoteSpace.ownerProfileId !== profileId) {
+      await replacePreparedIdProfilesForSpace(remoteSpace.id, mergedPreparedIdProfiles);
+    }
+
     byId.set(remoteSpace.id, {
       ...localSpace,
       ...remoteSpace,
@@ -630,10 +639,7 @@ export async function syncTeamSpaces(
       memberProfiles: mergedMembers,
       memberProfileIds: mergedMemberIds,
       memberHistory: mergedHistory,
-      preparedIdProfiles:
-        remoteSpace.ownerProfileId === profileId
-          ? localSpace.preparedIdProfiles ?? remoteSpace.preparedIdProfiles ?? []
-          : remoteSpace.preparedIdProfiles ?? localSpace.preparedIdProfiles ?? [],
+      preparedIdProfiles: mergedPreparedIdProfiles,
     });
   }
 

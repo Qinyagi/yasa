@@ -48,6 +48,32 @@ Physical QA empfohlen:
 - Pages öffnen/wechseln und prüfen, ob Ladegefühl besser ist.
 - `Meine Shiftpals`, `Shiftpals Tagesdetails`, `Infoservice`, `Space-Mitglieder`, `Zeitkonto`, `Admin` und `Deine Spaces` kurz gegenprüfen.
 
+## Hotfix 2026-05-03: Device-B Space Leave + Prepared Roster Spiegelung
+
+User-Fund:
+
+- Device B konnte als normales Member keinen Space verlassen.
+- Device B sah trotz aktivem Space nicht zuverlässig die matchenden Prepared Shiftpals.
+
+Befund:
+
+- Der Backend-Helfer für Membership-Remove existierte, aber Nicht-Owner hatten im Admin-Space-Card keinen sichtbaren Austritts-Button.
+- `syncTeamSpaces()` übernahm `preparedIdProfiles` in den zurückgegebenen Space, spiegelte den remote Prepared-Roster bei bereits lokal bekannten Spaces aber nicht in `yasa.preparedIdProfiles.v1`.
+- `Heute im Team` und `Shiftpals Tagesdetails` lesen den Prepared-Roster aus diesem lokalen Prepared-Storage; dadurch konnte Device B trotz erfolgreichem Space-Sync leer bleiben.
+
+Fix:
+
+- Nicht-Owner/Member sehen im Admin-Bereich pro Space jetzt `Space verlassen` mit zweistufiger Bestätigung.
+- Non-owner Sync schreibt den remote Prepared-Roster nun auch bei bereits bekannten Spaces via `replacePreparedIdProfilesForSpace(...)` in den lokalen Prepared-Storage.
+
+Validierung:
+
+- `npm run typecheck`: PASS
+- `npx sucrase-node lib/__tests__/memberSync.test.ts`: PASS
+- `npx sucrase-node lib/__tests__/preparedProfilesShiftpals.test.ts`: PASS
+- `npm test`: PASS
+- `npm run ops:android:release-install`: PASS auf Device A `KNMVMVGY89NFHAQ4` und Device B `R5CX15JX98E`
+
 ## Checkpoint 2026-05-02: Space Gate Lock + Prepared Profiles In Shiftpals
 
 Space Cleanup / Space Isolation finaler technischer Gate:
