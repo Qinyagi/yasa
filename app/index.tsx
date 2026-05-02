@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -14,8 +14,9 @@ import { useFocusEffect } from '@react-navigation/native';
 import {
   getProfile,
   getSpaces,
-  getShiftPlan,
-  getShiftForDate,
+  buildSpaceProfileKey,
+  getShiftPlanForSpace,
+  getShiftForDateForSpace,
   getCurrentSpaceId,
   getOpenSwapRequests,
   getTimeClockConfigOrDefault,
@@ -30,10 +31,17 @@ import {
   getOpenShortShiftVacationReminders,
   confirmShortShiftVacationReminder,
   snoozeShortShiftVacationReminder,
+  getSpaceStatusEvents,
+  upsertSpaceStatusEvents,
+  getSeenSpaceStatusEventIds,
+  markSpaceStatusEventSeen,
   type ShortShiftVacationReminder,
 } from '../lib/storage';
+import { pullSpaceStatusEvents } from '../lib/backend/spaceStatusSync';
+import { isShiftpalRelevantStatusEvent } from '../lib/spaceStatusRelevance';
 import { MultiavatarView } from '../components/MultiavatarView';
 import type { RegularShiftCode, ShiftType, TimeClockEventType, UserProfile } from '../types';
+import type { SpaceStatusEvent } from '../types/spaceStatus';
 import { typography, spacing, borderRadius, shadows, warmHuman } from '../constants/theme';
 import { logInfo } from '../lib/log';
 import { Button } from '../components/Button';
@@ -95,17 +103,24 @@ export default function StartScreen() {
   const [openSwapCount, setOpenSwapCount] = useState(0);
   const [stampPrompt, setStampPrompt] = useState<StampPrompt | null>(null);
   const [shortShiftReminder, setShortShiftReminder] = useState<ShortShiftVacationReminder | null>(null);
+  const [spaceStatusPrompt, setSpaceStatusPrompt] = useState<SpaceStatusEvent | null>(null);
+  const completedPromptKeysRef = useRef<Set<string>>(new Set());
   // Bewusst in-memory: "Spaeter" gilt nur bis zum naechsten App-Restart.
   const [dismissedPromptKey, setDismissedPromptKey] = useState<string | null>(null);
   const [missedStampCount, setMissedStampCount] = useState(0);
+  // P0 (2026-04-11): autoStamp-Fehler sichtbar halten, bis die nächste
+  // erfolgreiche Ausführung den State zurücksetzt. Kein stilles Swallowing.
+  const [autoStampError, setAutoStampError] = useState<string | null>(null);
   const [stamping, setStamping] = useState(false);
   const [confirmingShortShiftReminder, setConfirmingShortShiftReminder] = useState(false);
   const [snoozingShortShiftReminder, setSnoozingShortShiftReminder] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const detectStampPrompt = useCallback(
-    async (profileId: string): Promise<StampPrompt | null> => {
-      const forcedPrompt = await getTimeClockTestPrompt(profileId);
+    async (profileId: string, spaceId: string | null): Promise<StampPrompt | null> => {
+      if (!spaceId) return null;
+      const storageProfileId = buildSpaceProfileKey(spaceId, profileId);
+      const forcedPrompt = await getTimeClockTestPrompt(storageProfileId);
       if (forcedPrompt) {
         return {
           key: `test-${forcedPrompt.createdAt}`,
@@ -116,8 +131,8 @@ export default function StartScreen() {
         };
       }
 
-      const config = await getTimeClockConfigOrDefault(profileId);
-      const events = await getTimeClockEvents(profileId);
+      const config = await getTimeClockConfigOrDefault(storageProfileId);
+      const events = await getTimeClockEvents(storageProfileId);
       const now = new Date();
       const today = todayISO();
       const yesterday = plusDays(today, -1);
@@ -132,7 +147,7 @@ export default function StartScreen() {
       }> = [];
 
       for (const shiftDateISO of candidateDates) {
-        const shiftCode = await getShiftForDate(profileId, shiftDateISO);
+        const shiftCode = await getShiftForDateForSpace(spaceId, profileId, shiftDateISO);
         if (!isRegularShiftCode(shiftCode)) continue;
 
         const settings = config.shiftSettings[shiftCode];
@@ -195,6 +210,34 @@ export default function StartScreen() {
     []
   );
 
+  const detectSpaceStatusPrompt = useCallback(
+    async (profileId: string, spaceId: string): Promise<SpaceStatusEvent | null> => {
+      let events: SpaceStatusEvent[];
+      try {
+        const remote = await pullSpaceStatusEvents(spaceId);
+        events =
+          remote.length > 0
+            ? await upsertSpaceStatusEvents(spaceId, remote)
+            : await getSpaceStatusEvents(spaceId);
+      } catch {
+        events = await getSpaceStatusEvents(spaceId);
+      }
+
+      const seen = new Set(await getSeenSpaceStatusEventIds(profileId));
+      for (const event of events) {
+        if (event.type !== 'day_status_changed') continue;
+        if (event.actorProfileId === profileId) continue;
+        if (seen.has(event.id)) continue;
+        const ownShift = event.dateISO ? await getShiftForDateForSpace(spaceId, profileId, event.dateISO) : null;
+        if (isShiftpalRelevantStatusEvent(event, profileId, ownShift)) {
+          return event;
+        }
+      }
+      return null;
+    },
+    []
+  );
+
   const loadCurrentContext = useCallback(async () => {
     setLoading(true);
     logInfo('StartScreen', 'loadCurrentContext');
@@ -203,38 +246,53 @@ export default function StartScreen() {
     let hasShift = false;
     let swapCount = 0;
     if (p) {
-      const plan = await getShiftPlan(p.id);
-      hasShift = plan !== null && plan.pattern.length > 0;
       const currentId = await getCurrentSpaceId();
+      const plan = currentId ? await getShiftPlanForSpace(currentId, p.id) : null;
+      hasShift = plan !== null && plan.pattern.length > 0;
       if (currentId) {
         const openSwaps = await getOpenSwapRequests(currentId);
         swapCount = openSwaps.length;
+        setSpaceStatusPrompt(await detectSpaceStatusPrompt(p.id, currentId));
+      } else {
+        setSpaceStatusPrompt(null);
       }
-      const prompt = await detectStampPrompt(p.id);
-      // Auto-Platzhalter für vergessene Stempelzeiten (best-effort, idempotent)
+      const prompt = await detectStampPrompt(p.id, currentId);
+      // Auto-Platzhalter für vergessene Stempelzeiten (best-effort, idempotent).
+      // P0 (2026-04-11): Fehler werden erfasst und im Banner angezeigt.
+      // Erfolg löscht den Fehlerzustand (stale Messages werden aufgelöst).
       let newPlaceholders = 0;
       try {
-        newPlaceholders = await autoStampMissedShifts(p.id);
-      } catch { /* best-effort */ }
+        newPlaceholders = await autoStampMissedShifts(p.id, { spaceId: currentId });
+        setAutoStampError(null);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setAutoStampError(`Auto-Platzhalter konnte nicht ausgeführt werden: ${msg}`);
+      }
       setMissedStampCount(newPlaceholders);
-      const shortShiftReminders = await getOpenShortShiftVacationReminders(p.id);
+      const reminderProfileId = currentId ? buildSpaceProfileKey(currentId, p.id) : p.id;
+      const shortShiftReminders = await getOpenShortShiftVacationReminders(reminderProfileId);
       setShortShiftReminder(shortShiftReminders.length > 0 ? shortShiftReminders[0] : null);
-      if (prompt && prompt.key !== dismissedPromptKey) {
+      const promptWasAlreadyCompleted = prompt
+        ? completedPromptKeysRef.current.has(prompt.key)
+        : false;
+      if (prompt && prompt.key !== dismissedPromptKey && !promptWasAlreadyCompleted) {
         setStampPrompt(prompt);
-      } else if (!prompt) {
+      } else if (!prompt || promptWasAlreadyCompleted) {
         setStampPrompt(null);
       }
     } else {
       setStampPrompt(null);
       setShortShiftReminder(null);
+      setSpaceStatusPrompt(null);
       setMissedStampCount(0);
+      setAutoStampError(null);
     }
     setProfile(p);
     setHasSpaces(s.length > 0);
     setHasShiftPlan(hasShift);
     setOpenSwapCount(swapCount);
     setLoading(false);
-  }, [detectStampPrompt, dismissedPromptKey]);
+  }, [detectSpaceStatusPrompt, detectStampPrompt, dismissedPromptKey]);
 
   useFocusEffect(
     useCallback(() => {
@@ -252,41 +310,63 @@ export default function StartScreen() {
   }, [loadCurrentContext]);
 
   async function handleStampFromPopup() {
-    if (!profile || !stampPrompt) return;
+    if (!profile || !stampPrompt || stamping) return;
+    const currentId = await getCurrentSpaceId();
+    if (!currentId) return;
+    const storageProfileId = buildSpaceProfileKey(currentId, profile.id);
+    const promptToStamp = stampPrompt;
     setStamping(true);
-    const now = new Date();
-    await addTimeClockEvent(profile.id, {
-      dateISO: stampPrompt.shiftDateISO,
-      weekdayLabel: weekdayLabel(stampPrompt.shiftDateISO),
-      shiftCode: stampPrompt.shiftCode,
-      eventType: stampPrompt.eventType,
-      timestampISO: now.toISOString(),
-      source: stampPrompt.source === 'test' ? 'manual_test_popup' : 'manual_popup',
-    });
-    if (stampPrompt.source === 'test') {
-      await clearTimeClockTestPrompt(profile.id);
+    try {
+      const now = new Date();
+      await addTimeClockEvent(storageProfileId, {
+        dateISO: promptToStamp.shiftDateISO,
+        weekdayLabel: weekdayLabel(promptToStamp.shiftDateISO),
+        shiftCode: promptToStamp.shiftCode,
+        eventType: promptToStamp.eventType,
+        timestampISO: now.toISOString(),
+        source: promptToStamp.source === 'test' ? 'manual_test_popup' : 'manual_popup',
+      });
+      completedPromptKeysRef.current.add(promptToStamp.key);
+      if (promptToStamp.source === 'test') {
+        await clearTimeClockTestPrompt(storageProfileId);
+      }
+      setStampPrompt(null);
+      setDismissedPromptKey(promptToStamp.key);
+    } finally {
+      setStamping(false);
     }
-    setStamping(false);
-    setStampPrompt(null);
-    setDismissedPromptKey(null);
   }
 
   async function handleConfirmShortShiftReminder() {
     if (!profile || !shortShiftReminder) return;
+    const currentId = await getCurrentSpaceId();
+    const reminderProfileId = currentId ? buildSpaceProfileKey(currentId, profile.id) : profile.id;
     setConfirmingShortShiftReminder(true);
-    await confirmShortShiftVacationReminder(profile.id, shortShiftReminder.id);
-    const remaining = await getOpenShortShiftVacationReminders(profile.id);
+    await confirmShortShiftVacationReminder(reminderProfileId, shortShiftReminder.id);
+    const remaining = await getOpenShortShiftVacationReminders(reminderProfileId);
     setShortShiftReminder(remaining.length > 0 ? remaining[0] : null);
     setConfirmingShortShiftReminder(false);
   }
 
   async function handleSnoozeShortShiftReminder() {
     if (!profile || !shortShiftReminder) return;
+    const currentId = await getCurrentSpaceId();
+    const reminderProfileId = currentId ? buildSpaceProfileKey(currentId, profile.id) : profile.id;
     setSnoozingShortShiftReminder(true);
-    await snoozeShortShiftVacationReminder(profile.id, shortShiftReminder.id);
-    const remaining = await getOpenShortShiftVacationReminders(profile.id);
+    await snoozeShortShiftVacationReminder(reminderProfileId, shortShiftReminder.id);
+    const remaining = await getOpenShortShiftVacationReminders(reminderProfileId);
     setShortShiftReminder(remaining.length > 0 ? remaining[0] : null);
     setSnoozingShortShiftReminder(false);
+  }
+
+  async function dismissSpaceStatusPrompt(openInfoService = false) {
+    if (profile && spaceStatusPrompt) {
+      await markSpaceStatusEventSeen(profile.id, spaceStatusPrompt.id);
+    }
+    setSpaceStatusPrompt(null);
+    if (openInfoService) {
+      router.push('/(services)/info-service');
+    }
   }
 
   const canSnoozeShortShiftReminder =
@@ -357,6 +437,13 @@ export default function StartScreen() {
               </Text>
               <Text style={styles.missedStampBannerLink}>Überprüfen →</Text>
             </TouchableOpacity>
+          )}
+
+          {/* Auto-Platzhalter Fehler Banner (P0 2026-04-11) */}
+          {autoStampError !== null && (
+            <View style={styles.autoStampErrorBanner} testID="autostamp-error-banner">
+              <Text style={styles.autoStampErrorBannerText}>⚠️ {autoStampError}</Text>
+            </View>
           )}
 
           {/* Hinweise wenn Space oder Shift fehlt */}
@@ -449,6 +536,13 @@ export default function StartScreen() {
             fullWidth
             variant="hero"
           />
+          <Button
+            label="Transfer-QR scannen"
+            onPress={() => router.push('/(space)/join')}
+            fullWidth
+            variant="heroSecondary"
+            style={styles.transferScanButton}
+          />
         </>
       )}
 
@@ -493,7 +587,9 @@ export default function StartScreen() {
               onPress={() => {
                 if (stampPrompt) setDismissedPromptKey(stampPrompt.key);
                 if (profile && stampPrompt?.source === 'test') {
-                  clearTimeClockTestPrompt(profile.id).catch(() => null);
+                  getCurrentSpaceId()
+                    .then((spaceId) => spaceId ? clearTimeClockTestPrompt(buildSpaceProfileKey(spaceId, profile.id)) : null)
+                    .catch(() => null);
                 }
                 setStampPrompt(null);
               }}
@@ -545,6 +641,41 @@ export default function StartScreen() {
                 </Text>
               </TouchableOpacity>
             )}
+          </View>
+        </View>
+      </Modal>
+
+      <Modal
+        visible={!!spaceStatusPrompt && !stampPrompt && !shortShiftReminder}
+        transparent
+        animationType="fade"
+        onRequestClose={() => {
+          dismissSpaceStatusPrompt(false).catch(() => null);
+        }}
+      >
+        <View style={styles.promptBackdrop}>
+          <View style={styles.promptCard}>
+            <Text style={styles.promptTitle}>Team-Status</Text>
+            {spaceStatusPrompt && (
+              <>
+                <Text style={styles.promptText}>{spaceStatusPrompt.body}</Text>
+                {!!spaceStatusPrompt.dateISO && (
+                  <Text style={styles.promptMeta}>Betroffener Tag: {spaceStatusPrompt.dateISO}</Text>
+                )}
+              </>
+            )}
+            <TouchableOpacity
+              style={styles.promptPrimaryBtn}
+              onPress={() => dismissSpaceStatusPrompt(true).catch(() => null)}
+            >
+              <Text style={styles.promptPrimaryBtnText}>Infoservice öffnen</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.promptSecondaryBtn}
+              onPress={() => dismissSpaceStatusPrompt(false).catch(() => null)}
+            >
+              <Text style={styles.promptSecondaryBtnText}>Verstanden</Text>
+            </TouchableOpacity>
           </View>
         </View>
       </Modal>
@@ -772,6 +903,21 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     fontWeight: typography.fontWeight.semibold,
   },
+  // AutoStamp Error Banner (P0 2026-04-11)
+  autoStampErrorBanner: {
+    backgroundColor: '#FFEBEE',
+    borderRadius: borderRadius.lg,
+    paddingVertical: 10,
+    paddingHorizontal: spacing.md,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: '#E57373',
+  },
+  autoStampErrorBannerText: {
+    color: '#B71C1C',
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.medium,
+  },
   // Welcome
   welcomeText: {
     color: warmHuman.textSecondary,
@@ -780,6 +926,9 @@ const styles = StyleSheet.create({
     marginBottom: spacing.xl,
     lineHeight: 22,
     paddingHorizontal: spacing.md,
+  },
+  transferScanButton: {
+    marginTop: spacing.md,
   },
   // Stempeluhr Popup
   promptBackdrop: {

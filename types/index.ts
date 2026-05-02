@@ -1,3 +1,6 @@
+import type { SpaceRuleProfile } from './timeAccount';
+import type { PreparedIdProfile } from './preparedProfile';
+
 // ─── YASA Core Types ───────────────────────────────────────────────────────────
 
 /**
@@ -97,6 +100,16 @@ export interface Space {
    * Nur für Host-Ansicht (members.tsx) relevant.
    */
   memberHistory?: MemberLifecycleEntry[];
+  /**
+   * Optionales Space-Regelprofil für Cross-Device Sync.
+   * Backward-Compat: kann fehlen; lokale Storage-Map bleibt Quelle/Fallback.
+   */
+  spaceRuleProfile?: SpaceRuleProfile | null;
+  /**
+   * Host-prepared onboarding profiles for this Space.
+   * Read-only roster signal for members; never grants membership/permissions.
+   */
+  preparedIdProfiles?: PreparedIdProfile[];
 }
 
 // ─── Shift Types (Iteration 6 + 7 Erweiterung) ─────────────────────────────
@@ -105,12 +118,12 @@ export interface Space {
  * Schichtcode:
  * F = Frühschicht, S = Spätschicht, N = Nachtschicht,
  * T = Tagesdienst, KS = Kurzer Spätdienst, KN = Kurzer Nachtdienst,
- * K = Kurzer Dienst (Legacy-Altcode),
+ * K = Krank, EK = entschuldigt Krank,
  * R = Ruhe (ehem. O/Frei), U = Urlaub, X = Platzhalter/Frei
  *
  * Migration: Alter Code „O" wird on-read zu „R" migriert.
  */
-export type ShiftType = 'F' | 'S' | 'N' | 'T' | 'KS' | 'KN' | 'K' | 'R' | 'U' | 'X';
+export type ShiftType = 'F' | 'S' | 'N' | 'T' | 'KS' | 'KN' | 'K' | 'EK' | 'R' | 'U' | 'X';
 
 /**
  * Metadaten zu einem Schichtcode (für spätere Anzeige / Farben).

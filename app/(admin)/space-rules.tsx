@@ -13,6 +13,7 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   getProfile, getSpaces, getSpaceRuleProfile, setSpaceRuleProfile,
 } from '../../lib/storage';
+import { syncTeamSpaces } from '../../lib/backend/teamSync';
 import type { Space, UserProfile } from '../../types';
 import type { SpaceRuleProfile } from '../../types/timeAccount';
 import {
@@ -48,6 +49,7 @@ export default function SpaceRulesScreen() {
 
   const [loading, setLoading]     = useState(true);
   const [saving,  setSaving]      = useState(false);
+  const [lastSavedFingerprint, setLastSavedFingerprint] = useState('');
   const [profile, setProfile]     = useState<UserProfile | null>(null);
   const [space,   setSpace]       = useState<Space | null>(null);
   const [canEdit, setCanEdit]     = useState(false);
@@ -65,6 +67,59 @@ export default function SpaceRulesScreen() {
   const [preHolidayCreditOn,setPreHolidayCreditOn]= useState(false);
   const [preHolidayHours,   setPreHolidayHours]   = useState('3.85');
   const [schoolDefault,     setSchoolDefault]     = useState(false);
+
+  const buildFingerprint = useCallback(
+    (input: {
+      spaceId: string;
+      bundesland: string;
+      branche: string;
+      ruleProfileName: string;
+      sourceLabel: string;
+      sourceUrl: string;
+      wEnabled: boolean;
+      tEnabled: boolean;
+      holidayCreditOn: boolean;
+      holidayHours: string;
+      preHolidayCreditOn: boolean;
+      preHolidayHours: string;
+      schoolDefault: boolean;
+    }) =>
+      JSON.stringify({
+        spaceId: input.spaceId,
+        bundesland: input.bundesland,
+        branche: input.branche.trim(),
+        ruleProfileName: input.ruleProfileName.trim(),
+        sourceLabel: input.sourceLabel.trim(),
+        sourceUrl: input.sourceUrl.trim(),
+        wEnabled: input.wEnabled,
+        tEnabled: input.tEnabled,
+        holidayCreditOn: input.holidayCreditOn,
+        holidayHours: Number.parseFloat(input.holidayHours) || 0,
+        preHolidayCreditOn: input.preHolidayCreditOn,
+        preHolidayHours: Number.parseFloat(input.preHolidayHours) || 0,
+        schoolDefault: input.schoolDefault,
+      }),
+    []
+  );
+
+  const currentFingerprint = spaceId
+    ? buildFingerprint({
+        spaceId,
+        bundesland,
+        branche,
+        ruleProfileName,
+        sourceLabel,
+        sourceUrl,
+        wEnabled,
+        tEnabled,
+        holidayCreditOn,
+        holidayHours,
+        preHolidayCreditOn,
+        preHolidayHours,
+        schoolDefault,
+      })
+    : '';
+  const hasFormChanges = currentFingerprint !== lastSavedFingerprint;
 
   useFocusEffect(
     useCallback(() => {
@@ -97,12 +152,47 @@ export default function SpaceRulesScreen() {
             setPreHolidayCreditOn(existing.preHolidayCredit.enabled);
             setPreHolidayHours(String(existing.preHolidayCredit.hoursPerOccurrence));
             setSchoolDefault(existing.schoolHolidaysEnabledByDefault);
+            setLastSavedFingerprint(
+              buildFingerprint({
+                spaceId,
+                bundesland: existing.bundesland,
+                branche: existing.branche,
+                ruleProfileName: existing.ruleProfileName,
+                sourceLabel: existing.sourceLabel,
+                sourceUrl: existing.sourceUrl ?? '',
+                wEnabled: existing.codeRules.W?.enabled ?? false,
+                tEnabled: existing.codeRules.T?.enabled ?? false,
+                holidayCreditOn: existing.holidayCredit.enabled,
+                holidayHours: String(existing.holidayCredit.hoursPerHolidayShift),
+                preHolidayCreditOn: existing.preHolidayCredit.enabled,
+                preHolidayHours: String(existing.preHolidayCredit.hoursPerOccurrence),
+                schoolDefault: existing.schoolHolidaysEnabledByDefault,
+              })
+            );
+          } else if (active) {
+            setLastSavedFingerprint(
+              buildFingerprint({
+                spaceId,
+                bundesland: 'NW',
+                branche: '',
+                ruleProfileName: '',
+                sourceLabel: '',
+                sourceUrl: '',
+                wEnabled: false,
+                tEnabled: false,
+                holidayCreditOn: false,
+                holidayHours: '7.7',
+                preHolidayCreditOn: false,
+                preHolidayHours: '3.85',
+                schoolDefault: false,
+              })
+            );
           }
         }
         if (active) setLoading(false);
       });
       return () => { active = false; };
-    }, [spaceId])
+    }, [spaceId, buildFingerprint])
   );
 
   async function handleSave() {
@@ -117,7 +207,7 @@ export default function SpaceRulesScreen() {
     }
 
     setSaving(true);
-    const profile: SpaceRuleProfile = {
+    const ruleProfile: SpaceRuleProfile = {
       spaceId,
       bundesland,
       branche:        branche.trim(),
@@ -139,7 +229,18 @@ export default function SpaceRulesScreen() {
       schoolHolidaysEnabledByDefault: schoolDefault,
       updatedAt: new Date().toISOString(),
     };
-    await setSpaceRuleProfile(profile);
+    await setSpaceRuleProfile(ruleProfile);
+    // Direkt nach dem Speichern pushen, damit Member das Regelprofil
+    // ohne zusätzlichen manuellen Navigations-Trigger sehen.
+    try {
+      if (profile && profile.id) {
+        const localSpaces = await getSpaces();
+        await syncTeamSpaces(profile.id, localSpaces);
+      }
+    } catch {
+      // Non-fatal: lokales Speichern ist bereits erfolgt.
+    }
+    setLastSavedFingerprint(currentFingerprint);
     setSaving(false);
     Alert.alert('Gespeichert', 'Regelprofil wurde gespeichert.');
   }
@@ -342,12 +443,12 @@ export default function SpaceRulesScreen() {
 
       {/* ── Speichern ───────────────────────────────────────────────────── */}
       <TouchableOpacity
-        style={[styles.saveBtn, saving && styles.saveBtnDisabled]}
+        style={[styles.saveBtn, (saving || !hasFormChanges) && styles.saveBtnDisabled]}
         onPress={handleSave}
-        disabled={saving}
+        disabled={saving || !hasFormChanges}
       >
         <Text style={styles.saveBtnText}>
-          {saving ? 'Speichern...' : '💾 Regelprofil speichern'}
+          {saving ? 'Speichern...' : hasFormChanges ? '💾 Regelprofil speichern' : '✔ Gespeichert'}
         </Text>
       </TouchableOpacity>
 

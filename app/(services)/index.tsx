@@ -30,20 +30,31 @@ interface ServiceItem {
 
 const PRIMARY_SERVICES: ServiceItem[] = [
   {
-    id: 'time-account',
-    icon: '📊',
-    title: 'Urlaubs- & Freizeitkonto',
-    description: 'Wochenarbeitszeit, Stundenkonto und Regelwerk.',
-    route: '/(services)/time-account',
-    requiresSpace: false,
-  },
-  {
     id: 'strategy',
     icon: '💡',
     title: 'Brückentag-Strategie',
     description: 'Optimiere freie Tage mit smarten Tipps.',
     route: '/(shift)/strategy',
     requiresSpace: false,
+  },
+];
+
+const TEAM_PLANNING_SERVICES: ServiceItem[] = [
+  {
+    id: 'info-service',
+    icon: '📣',
+    title: 'YASA Infoservice',
+    description: 'Spaceweite Statusmeldungen zu wichtigen Team-Änderungen.',
+    route: '/(services)/info-service',
+    requiresSpace: true,
+  },
+  {
+    id: 'vacation-planning',
+    icon: '🌴',
+    title: 'Urlaubsvorplanung',
+    description: 'Wünsche fürs nächste Jahr sammeln, Konflikte erkennen und im Team abstimmen.',
+    route: '/(services)/vacation-planning',
+    requiresSpace: true,
   },
 ];
 
@@ -113,6 +124,14 @@ const TIMECLOCK_SERVICES: ServiceItem[] = [
     title: 'Stempeluhr',
     description: 'Kommen/Gehen erfassen und Stempelzeiten einsehen.',
     route: '/(services)/timeclock',
+    requiresSpace: false,
+  },
+  {
+    id: 'zeitkonto',
+    icon: '📊',
+    title: 'Zeitkonto',
+    description: 'Urlaubs- & Freizeitkonto mit Stundenübersicht und Regeln.',
+    route: '/(services)/time-account',
     requiresSpace: false,
   },
 ];
@@ -304,6 +323,46 @@ export default function ServicesScreen() {
             <Text style={styles.primaryServiceArrow}>→</Text>
           </TouchableOpacity>
         ))}
+      </View>
+
+      {/* ── Team Planning Zone ──────────────────────────────────────────── */}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionLabel}>Teamplanung</Text>
+      </View>
+
+      <View style={styles.primaryServices}>
+        {TEAM_PLANNING_SERVICES.map((service) => {
+          const isDisabled = service.requiresSpace && !hasSpace;
+          return (
+            <TouchableOpacity
+              key={service.id}
+              testID={`services-team-planning-${service.id}`}
+              style={[styles.teamPlanningCard, isDisabled && styles.secondaryServiceCardDisabled]}
+              onPress={() => handleOpenService(service)}
+              activeOpacity={0.85}
+              disabled={isDisabled}
+            >
+              <View style={styles.primaryServiceContent}>
+                <Text style={styles.teamPlanningIcon}>{service.icon}</Text>
+                <View style={styles.primaryServiceInfo}>
+                  <View style={styles.teamPlanningTitleRow}>
+                    <Text style={styles.teamPlanningTitle}>{service.title}</Text>
+                    <View style={styles.teamPlanningBadge}>
+                      <Text style={styles.teamPlanningBadgeText}>Team</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.teamPlanningDesc}>{service.description}</Text>
+                  {isDisabled && (
+                    <Text style={styles.disabledHint}>Space benötigt</Text>
+                  )}
+                </View>
+              </View>
+              <Text style={isDisabled ? styles.secondaryServiceArrowDisabled : styles.primaryServiceArrow}>
+                →
+              </Text>
+            </TouchableOpacity>
+          );
+        })}
       </View>
 
       {/* ── Secondary Services Zone ───────────────────────────────────────── */}
@@ -560,6 +619,52 @@ const styles = StyleSheet.create({
     fontSize: 20,
     color: warmHuman.primary,
     fontWeight: typography.fontWeight.bold,
+  },
+  // Team Planning
+  teamPlanningCard: {
+    backgroundColor: warmHuman.surfaceCard,
+    borderRadius: borderRadius.xl,
+    padding: spacing.lg,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: warmHuman.primary,
+    ...shadows.md,
+  },
+  teamPlanningIcon: {
+    fontSize: 34,
+    marginRight: spacing.md,
+  },
+  teamPlanningTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginBottom: 2,
+  },
+  teamPlanningTitle: {
+    fontSize: typography.fontSize.lg,
+    fontWeight: typography.fontWeight.bold,
+    color: warmHuman.primary,
+  },
+  teamPlanningBadge: {
+    backgroundColor: warmHuman.surfaceWarm,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: warmHuman.borderLight,
+    paddingVertical: 3,
+    paddingHorizontal: spacing.sm,
+  },
+  teamPlanningBadgeText: {
+    color: warmHuman.ink,
+    fontSize: typography.fontSize.xs,
+    fontWeight: typography.fontWeight.bold,
+  },
+  teamPlanningDesc: {
+    fontSize: typography.fontSize.sm,
+    color: warmHuman.textSecondary,
+    lineHeight: 20,
   },
   // Secondary Services
   secondaryServices: {

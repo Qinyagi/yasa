@@ -69,8 +69,8 @@ export function buildVacationStrategies(input: BuildVacationStrategiesInput): Va
     .filter((d) => d >= fromISO && d <= toISO)
     .sort();
 
-  const WORK_CODES = new Set<ShiftType>(['F', 'S', 'N', 'T', 'KS', 'KN', 'K']);
-  const OFF_CODES = new Set<ShiftType>(['R', 'X', 'U']);
+  const WORK_CODES = new Set<ShiftType>(['F', 'S', 'N', 'T', 'KS', 'KN']);
+  const OFF_CODES = new Set<ShiftType>(['R', 'X', 'U', 'K', 'EK']);
   const holidayDateSet = new Set(Object.keys(allHolidays));
 
   function isWeekendISO(dateISO: string): boolean {
@@ -227,4 +227,3 @@ export function buildVacationStrategies(input: BuildVacationStrategiesInput): Va
 
   return [...baseStrategies, ...hourStrategies];
 }
-

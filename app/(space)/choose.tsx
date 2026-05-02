@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
-import { getProfile, getSpaces, setCurrentSpaceId, setSpaces as saveSpaces } from '../../lib/storage';
+import { getCurrentSpaceId, getProfile, getSpaces, setSpaces as saveSpaces } from '../../lib/storage';
 import { syncTeamSpaces } from '../../lib/backend/teamSync';
 import { useRealtimeMemberSync } from '../../lib/backend/realtimeMembers';
 import { MultiavatarView } from '../../components/MultiavatarView';
@@ -21,6 +21,7 @@ export default function ChooseScreen() {
   const router = useRouter();
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
+  const [currentSpaceId, setCurrentSpaceId] = useState<string | null>(null);
   const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -29,12 +30,12 @@ export default function ChooseScreen() {
     useCallback(() => {
       let active = true;
       setLoading(true);
-      Promise.all([getProfile(), getSpaces()]).then(async ([p, s]) => {
+      Promise.all([getProfile(), getSpaces(), getCurrentSpaceId()]).then(async ([p, s, activeSpaceId]) => {
         if (active) {
           let resolvedSpaces = s;
           if (p) {
             try {
-              const syncResult = await syncTeamSpaces(p.id, s);
+              const syncResult = await syncTeamSpaces(p.id, s, { allowCached: true, ttlMs: 10_000 });
               resolvedSpaces = syncResult.spaces;
               await saveSpaces(resolvedSpaces);
               setSyncMessage(
@@ -49,6 +50,7 @@ export default function ChooseScreen() {
           }
           setProfile(p);
           setSpaces(resolvedSpaces);
+          setCurrentSpaceId(activeSpaceId);
           setLoading(false);
         }
       });
@@ -130,6 +132,7 @@ export default function ChooseScreen() {
             const isCoAdmin = space.coAdminProfileIds.includes(profileId);
             const isMember = space.memberProfileIds.includes(profileId);
             const memberCount = space.memberProfileIds.length;
+            const isActiveSpace = currentSpaceId === space.id;
 
             // Kann QR sehen: Owner oder CoAdmin
             const canSeeQR = isOwner || isCoAdmin;
@@ -151,6 +154,9 @@ export default function ChooseScreen() {
             return (
               <View key={space.id} style={styles.spaceCard}>
                 <Text style={styles.spaceName}>{space.name}</Text>
+                <Text style={[styles.activeSpaceHint, isActiveSpace && styles.activeSpaceHintOn]}>
+                  {isActiveSpace ? 'Aktiver Arbeits-Space' : 'Nicht aktiv'}
+                </Text>
                 <View style={styles.spaceMetaRow}>
                   <View style={[styles.roleBadge, roleStyle]}>
                     <Text style={styles.roleBadgeText}>{roleLabel}</Text>
@@ -161,37 +167,37 @@ export default function ChooseScreen() {
                   <Text style={styles.memberCount}>👥 {memberCount}</Text>
                 </View>
 
-                {/* ── Reihe 1: Admin Bereich (Owner/CoAdmin) ─────── */}
-                {(canSeeQR || isOwner) && (
+                {isActiveSpace ? (
                   <View style={styles.btnRow}>
                     <TouchableOpacity
-                      style={[styles.btn, styles.btnAdmin]}
-                      onPress={() => router.push('/(admin)')}
+                      style={[styles.btn, styles.btnShift]}
+                      onPress={() => router.push('/(shift)/setup')}
                     >
-                      <Text style={styles.btnAdminText}>⚙️ Admin</Text>
+                      <Text style={styles.btnShiftText}>📋 Dienstplan</Text>
                     </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.btn, styles.btnToday]}
+                      onPress={() => router.push('/(team)/today')}
+                    >
+                      <Text style={styles.btnTodayText}>👥 Heute im Team</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <View style={styles.inactiveBox}>
+                    <Text style={styles.inactiveText}>
+                      Schreibzugriff ist nur im aktiven Space möglich.
+                    </Text>
                   </View>
                 )}
 
-                {/* ── Reihe 2: Dienstplan + Heute (nebeneinander) ────── */}
                 <View style={styles.btnRow}>
                   <TouchableOpacity
-                    style={[styles.btn, styles.btnShift]}
-                    onPress={async () => {
-                      await setCurrentSpaceId(space.id);
-                      router.push('/(shift)/setup');
-                    }}
+                    style={[styles.btn, isActiveSpace ? styles.btnAdmin : styles.btnActivate]}
+                    onPress={() => router.push('/(admin)')}
                   >
-                    <Text style={styles.btnShiftText}>📋 Dienstplan</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.btn, styles.btnToday]}
-                    onPress={async () => {
-                      await setCurrentSpaceId(space.id);
-                      router.push('/(team)/today');
-                    }}
-                  >
-                    <Text style={styles.btnTodayText}>👥 Heute im Team</Text>
+                    <Text style={styles.btnAdminText}>
+                      {isActiveSpace ? '🔐 Admin Bereich' : '🔐 Im Admin aktivieren'}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -203,6 +209,13 @@ export default function ChooseScreen() {
             onPress={() => router.push('/(space)/create')}
           >
             <Text style={styles.buttonText}>Weiteren Space erstellen</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.button, styles.buttonSecondary, { marginTop: 12 }]}
+            onPress={() => router.push('/(space)/join')}
+          >
+            <Text style={styles.buttonText}>Per QR beitreten</Text>
           </TouchableOpacity>
         </>
       )}
@@ -278,7 +291,16 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.xl,
     fontWeight: typography.fontWeight.bold,
     color: colors.textPrimary,
+    marginBottom: spacing.xs,
+  },
+  activeSpaceHint: {
+    fontSize: typography.fontSize.xs,
+    color: colors.textTertiary,
     marginBottom: spacing.sm,
+    fontWeight: typography.fontWeight.semibold,
+  },
+  activeSpaceHintOn: {
+    color: colors.primary,
   },
   spaceMetaRow: {
     flexDirection: 'row',
@@ -335,6 +357,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#7C3AED',
     flex: 1,
   },
+  btnActivate: {
+    backgroundColor: '#0F766E',
+    flex: 1,
+  },
   btnAdminText: {
     color: colors.textInverse,
     fontSize: typography.fontSize.sm,
@@ -361,6 +387,19 @@ const styles = StyleSheet.create({
     color: colors.primaryDark,
     fontSize: typography.fontSize.sm,
     fontWeight: typography.fontWeight.semibold,
+    textAlign: 'center',
+  },
+  inactiveBox: {
+    width: '100%',
+    backgroundColor: colors.backgroundTertiary,
+    borderRadius: borderRadius.lg,
+    padding: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  inactiveText: {
+    color: colors.textSecondary,
+    fontSize: typography.fontSize.sm,
+    lineHeight: 19,
     textAlign: 'center',
   },
   button: {

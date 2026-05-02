@@ -28,6 +28,17 @@ export const WORK_MODEL_LABELS: Record<WorkModel, string> = {
  * Nur Owner/Admin dürfen diese Daten pflegen.
  * Wird unter yasa.timeAccountSpaceRules.v1 gespeichert (Map spaceId → Profil).
  */
+export interface ShiftPatternTemplate {
+  id: string;
+  name: string;
+  pattern: string[];
+  cycleLengthDays: number;
+  createdByProfileId: string;
+  createdByDisplayName: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface SpaceRuleProfile {
   spaceId: string;
   bundesland: string;
@@ -54,6 +65,11 @@ export interface SpaceRuleProfile {
   };
   /** Schulferien-Anzeige spaceweit als Default aktiv */
   schoolHolidaysEnabledByDefault: boolean;
+  /**
+   * Optionaler Space-weiter Schichtmuster-Vault.
+   * Enthält wiederverwendbare Muster, die von Host/Mitgliedern gepflegt werden.
+   */
+  shiftPatternVault?: ShiftPatternTemplate[];
   /** ISO-Timestamp der letzten Änderung */
   updatedAt: string;
 }
@@ -78,6 +94,34 @@ export interface UserTimeAccountProfile {
    */
   schoolHolidaysEnabled?: boolean | null;
   /** ISO-Timestamp der letzten Änderung */
+  updatedAt: string;
+}
+
+// ─── Zeitguthaben (manuell + Abbuchung bei X) ──────────────────────────────
+
+export type XCompensationSource = 'U' | 'GLZ' | 'FZGA' | 'VZGA' | 'W';
+
+export interface XCompensationBooking {
+  profileId: string;
+  dateISO: string;
+  source: XCompensationSource;
+  requiredHours: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface UserTimeBudgetProfile {
+  profileId: string;
+  /** Jährlicher Urlaubsanspruch (ganze Tage) */
+  annualVacationEntitlementDays: number;
+  /** Ganze Tage */
+  vacationDays: number; // U
+  /** Ganze Tage */
+  wDays: number; // W
+  /** Stundenkonten */
+  glzHours: number; // GLZ
+  fzgaHours: number; // FZGA
+  vzgaHours: number; // VZGA
   updatedAt: string;
 }
 

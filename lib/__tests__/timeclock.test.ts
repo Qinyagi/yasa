@@ -67,11 +67,22 @@ const asyncStorageMock = {
 import {
   applyVacationStrategy,
   deriveTimeClockStampState,
+  buildSpaceProfileKey,
   getDayChanges,
   getShiftForDate,
+  getShiftForDateForSpace,
+  getShiftPlanForSpace,
   getOpenShortShiftVacationReminders,
   getStrategyHoursBalance,
   getTimeClockEvents,
+  applyXCompensationForDate,
+  clearXCompensationForDate,
+  getVacationDays,
+  getVacationDaysForSpace,
+  getUserTimeBudgetProfile,
+  getXCompensationBooking,
+  saveShiftPlanForSpace,
+  setShiftOverride,
   STORAGE_KEYS,
 } from '../storage';
 // autoStamp.ts importiert intern aus storage.ts und nutzt ebenfalls den Mock.
@@ -297,6 +308,92 @@ describe('getShiftForDate – Override-Pfad', () => {
     const result = await getShiftForDate('p4', '2026-03-25');
     isNull(result);
   });
+
+  asyncTest('G10b: Space-Plan gewinnt vor Legacy-Plan', async () => {
+    clearMockStore();
+    setupShiftPlan('p-space', [{ dateISO: '2026-03-25', code: 'F' }]);
+    await saveShiftPlanForSpace('space-a', {
+      profileId: 'p-space',
+      startDateISO: '2026-01-01',
+      pattern: ['S'],
+      cycleLengthDays: 1,
+      generatedUntilISO: '2026-03-25',
+      entries: [{ dateISO: '2026-03-25', code: 'S' }],
+    });
+    const result = await getShiftForDateForSpace('space-a', 'p-space', '2026-03-25');
+    eq(result, 'S', `Erwartet 'S' (Space-Plan), bekam ${String(result)}`);
+  });
+
+  asyncTest('G10c: Space-Plan ohne eigenen Eintrag bleibt leer statt Legacy zu zeigen', async () => {
+    clearMockStore();
+    setupShiftPlan('p-legacy', [{ dateISO: '2026-03-25', code: 'N' }]);
+    const result = await getShiftPlanForSpace('space-b', 'p-legacy');
+    isNull(result);
+    const stored = JSON.parse(mockStore[STORAGE_KEYS.SHIFTS]) as Record<string, unknown>;
+    eq(Object.prototype.hasOwnProperty.call(stored, buildSpaceProfileKey('space-b', 'p-legacy')), false);
+  });
+
+  asyncTest('G10d: Original-Workspace migriert Legacy-Daten, spätere Spaces bleiben frisch', async () => {
+    clearMockStore();
+    const profileId = 'p-main';
+    const originalSpaceId = 'space-original';
+    const laterSpaceId = 'space-later';
+    mockStore[STORAGE_KEYS.SPACES] = JSON.stringify([
+      {
+        id: originalSpaceId,
+        name: 'Workspace',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        ownerProfileId: profileId,
+        ownerDisplayName: 'Main',
+        inviteToken: 'token-a',
+        coAdminProfileIds: [],
+        memberProfileIds: [profileId],
+        memberProfiles: [{ id: profileId, displayName: 'Main', avatarUrl: 'main' }],
+        memberHistory: [],
+      },
+      {
+        id: laterSpaceId,
+        name: 'DRAGONFLY SPACE',
+        createdAt: '2026-02-01T00:00:00.000Z',
+        ownerProfileId: profileId,
+        ownerDisplayName: 'Main',
+        inviteToken: 'token-b',
+        coAdminProfileIds: [],
+        memberProfileIds: [profileId],
+        memberProfiles: [{ id: profileId, displayName: 'Main', avatarUrl: 'main' }],
+        memberHistory: [],
+      },
+    ]);
+    setupShiftPlan(profileId, [{ dateISO: '2026-03-25', code: 'F' }]);
+    mockStore[STORAGE_KEYS.VACATION] = JSON.stringify({ [profileId]: ['2026-03-26'] });
+    mockStore[STORAGE_KEYS.TIMECLOCK_EVENTS] = JSON.stringify({
+      [profileId]: [
+        {
+          id: 'evt-legacy',
+          profileId,
+          dateISO: '2026-03-25',
+          weekdayLabel: 'Mittwoch',
+          shiftCode: 'F',
+          eventType: 'check_in',
+          timestampISO: '2026-03-25T06:00:00.000Z',
+          source: 'manual_service',
+          createdAt: '2026-03-25T06:00:00.000Z',
+        },
+      ],
+    });
+
+    const originalPlan = await getShiftPlanForSpace(originalSpaceId, profileId);
+    eq(originalPlan?.entries[0]?.code, 'F');
+    const originalScopedKey = buildSpaceProfileKey(originalSpaceId, profileId);
+    const originalVacation = await getVacationDaysForSpace(originalSpaceId, profileId);
+    eq(originalVacation.includes('2026-03-26'), true);
+    eq((await getTimeClockEvents(originalScopedKey)).length, 1);
+
+    const laterPlan = await getShiftPlanForSpace(laterSpaceId, profileId);
+    isNull(laterPlan);
+    const storedPlans = JSON.parse(mockStore[STORAGE_KEYS.SHIFTS]) as Record<string, unknown>;
+    eq(Object.prototype.hasOwnProperty.call(storedPlans, buildSpaceProfileKey(laterSpaceId, profileId)), false);
+  });
 });
 
 // ─── Gruppe 3: Reminder-Retention ────────────────────────────────────────────
@@ -514,6 +611,126 @@ describe('applyVacationStrategy (hours) – Stundenbank', () => {
     eq(balance, 2);
     const effectiveCode = await getShiftForDate(profileId, '2026-04-02');
     eq(effectiveCode, 'KS');
+  });
+});
+
+// ─── Gruppe 6b: X-Ausgleichsbuchung / Reversal ──────────────────────────────
+
+describe('X compensation account switching', () => {
+  function clearMockStore(): void {
+    Object.keys(mockStore).forEach((k) => {
+      delete mockStore[k];
+    });
+  }
+
+  function setupTimeBudget(profileId: string): void {
+    mockStore[STORAGE_KEYS.TIME_ACCOUNT_BUDGET] = JSON.stringify({
+      [profileId]: {
+        profileId,
+        annualVacationEntitlementDays: 30,
+        vacationDays: 2,
+        wDays: 1,
+        glzHours: 10,
+        fzgaHours: 4,
+        vzgaHours: 3,
+        updatedAt: '2026-04-01T00:00:00.000Z',
+      },
+    });
+  }
+
+  asyncTest('X1: Wechsel GLZ → Urlaub stellt GLZ wieder her und belastet Urlaub', async () => {
+    clearMockStore();
+    const profileId = 'p-x1';
+    const dateISO = '2026-04-05';
+    setupTimeBudget(profileId);
+    await setShiftOverride(profileId, dateISO, 'X');
+
+    const first = await applyXCompensationForDate({
+      profileId,
+      dateISO,
+      source: 'GLZ',
+      requiredHours: 8,
+      originalCode: 'F',
+    });
+    if (!first.ok) throw new Error(first.reason);
+    eq(first.budget.glzHours, 2);
+
+    const second = await applyXCompensationForDate({
+      profileId,
+      dateISO,
+      source: 'U',
+      requiredHours: 8,
+      originalCode: 'F',
+    });
+    if (!second.ok) throw new Error(second.reason);
+    eq(second.budget.glzHours, 10, 'GLZ muss vor Urlaub-Belastung zurückgeschrieben werden');
+    eq(second.budget.vacationDays, 1, 'Urlaub muss genau einen Tag belasten');
+
+    const booking = await getXCompensationBooking(profileId, dateISO);
+    eq(booking?.source, 'U');
+    const vacationDays = await getVacationDays(profileId);
+    eq(vacationDays.includes(dateISO), true, 'Urlaubsausgleich muss im Kalender als Urlaub erscheinen');
+  });
+
+  asyncTest('X2: Wechsel auf Urlaub scheitert ohne Urlaubsguthaben und lässt alte Buchung intakt', async () => {
+    clearMockStore();
+    const profileId = 'p-x2';
+    const dateISO = '2026-04-06';
+    setupTimeBudget(profileId);
+    await setShiftOverride(profileId, dateISO, 'X');
+
+    const first = await applyXCompensationForDate({
+      profileId,
+      dateISO,
+      source: 'GLZ',
+      requiredHours: 8,
+      originalCode: 'F',
+    });
+    if (!first.ok) throw new Error(first.reason);
+
+    const current = await getUserTimeBudgetProfile(profileId);
+    mockStore[STORAGE_KEYS.TIME_ACCOUNT_BUDGET] = JSON.stringify({
+      [profileId]: { ...current, vacationDays: 0 },
+    });
+
+    const failed = await applyXCompensationForDate({
+      profileId,
+      dateISO,
+      source: 'U',
+      requiredHours: 8,
+      originalCode: 'F',
+    });
+    eq(failed.ok, false);
+
+    const after = await getUserTimeBudgetProfile(profileId);
+    eq(after.glzHours, 2, 'Alte GLZ-Buchung bleibt erhalten, wenn Urlaub nicht reicht');
+    eq(after.vacationDays, 0, 'Urlaub darf nicht ins Minus gehen');
+    const booking = await getXCompensationBooking(profileId, dateISO);
+    eq(booking?.source, 'GLZ');
+  });
+
+  asyncTest('X3: Clear stellt die alte Buchung zurück und entfernt Urlaubsausgleich', async () => {
+    clearMockStore();
+    const profileId = 'p-x3';
+    const dateISO = '2026-04-07';
+    setupTimeBudget(profileId);
+    await setShiftOverride(profileId, dateISO, 'X');
+
+    const applied = await applyXCompensationForDate({
+      profileId,
+      dateISO,
+      source: 'U',
+      requiredHours: 8,
+      originalCode: 'F',
+    });
+    if (!applied.ok) throw new Error(applied.reason);
+    eq((await getVacationDays(profileId)).includes(dateISO), true);
+
+    const restored = await clearXCompensationForDate(profileId, dateISO);
+    eq(restored.vacationDays, 2);
+    eq((await getVacationDays(profileId)).includes(dateISO), false);
+    const booking = await getXCompensationBooking(profileId, dateISO);
+    eq(booking, null);
   });
 });
 

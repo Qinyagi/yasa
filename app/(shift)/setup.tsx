@@ -21,24 +21,51 @@ import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   getProfile,
   generateShiftEntries,
-  saveShiftPlan,
+  saveShiftPlanForSpace,
   getShiftPlan,
+  getShiftPlanForSpace,
   getShiftColorOverrides,
   formatDateISO,
   todayISO,
   isValidISODate,
+  getCurrentSpaceId,
+  getSpaceRuleProfile,
+  getSpaceShiftPatternVault,
+  upsertSpaceShiftPatternTemplate,
+  deleteSpaceShiftPatternTemplate,
+  getSpaces,
+  setSpaces,
+  persistSyncedRuleProfile,
 } from '../../lib/storage';
 import { weekdayIndexUTC, detectSubPattern, diffDaysUTC } from '../../lib/shiftEngine';
 import { buildShiftMetaWithOverrides } from '../../lib/shiftColors';
 import type { UserProfile, ShiftType, UserShiftPlan } from '../../types';
+import type { ShiftPatternTemplate } from '../../types/timeAccount';
+import { pullSpacesForProfile, syncTeamSpaces } from '../../lib/backend/teamSync';
 
 // ─── Konstanten ────────────────────────────────────────────────────────────────
 
 const CYCLE_PRESETS = [7, 14, 21, 28] as const;
 const MIN_CYCLE = 1;
 const MAX_CYCLE = 120;
-const REPETITION_OPTIONS = [5, 10, 25, 50, 100] as const;
-const RETRO_WINDOW_DAYS = 365;
+const VAULT_REFRESH_MS = 8000;
+
+type PatternFitCandidate = {
+  key: string;
+  patternIndex: number;
+  startDateISO: string;
+  matches: number;
+  mismatches: number;
+  knownCount: number;
+  scorePct: number;
+  preview: { dateISO: string; code: ShiftType }[];
+};
+
+type PatternFitGuideDay = {
+  dateISO: string;
+  offset: number;
+  code: ShiftType | null;
+};
 
 // ─── Helper ────────────────────────────────────────────────────────────────────
 
@@ -62,6 +89,88 @@ function addDaysISO(dateISO: string, days: number): string {
   const date = new Date(year, month - 1, day);
   date.setDate(date.getDate() + days);
   return formatDateISO(date);
+}
+
+function startOfPreviousYearISO(reference = new Date()): string {
+  return `${reference.getFullYear() - 1}-01-01`;
+}
+
+function endOfNextYearISO(reference = new Date()): string {
+  return `${reference.getFullYear() + 1}-12-31`;
+}
+
+function buildPlanWindowLabel(reference = new Date()): string {
+  return `${formatGerman(startOfPreviousYearISO(reference))} bis ${formatGerman(endOfNextYearISO(reference))}`;
+}
+
+function buildShiftPlanEntriesForPlanningWindow(input: {
+  anchorDateISO: string;
+  pattern: ShiftType[];
+  cycleLengthDays: number;
+  windowStartISO?: string;
+  windowEndISO?: string;
+}): { effectiveStartISO: string; generatedUntilISO: string; entries: Array<{ dateISO: string; code: ShiftType }> } {
+  const windowStartISO = input.windowStartISO ?? startOfPreviousYearISO();
+  const windowEndISO = input.windowEndISO ?? endOfNextYearISO();
+  let effectiveStartISO = input.anchorDateISO;
+
+  if (input.cycleLengthDays > 0) {
+    const backSpan = Math.max(0, diffDaysUTC(windowStartISO, input.anchorDateISO));
+    if (backSpan > 0) {
+      const cyclesBack = Math.ceil(backSpan / input.cycleLengthDays);
+      effectiveStartISO = addDaysISO(input.anchorDateISO, -(cyclesBack * input.cycleLengthDays));
+    }
+  }
+
+  const totalDays = Math.max(1, diffDaysUTC(effectiveStartISO, windowEndISO) + 1);
+  const weeksNeeded = Math.ceil(totalDays / 7);
+  const entries = generateShiftEntries(effectiveStartISO, input.pattern, weeksNeeded).filter(
+    (entry) => entry.dateISO >= windowStartISO && entry.dateISO <= windowEndISO
+  );
+  const generatedUntilISO = entries.length > 0 ? entries[entries.length - 1].dateISO : windowEndISO;
+
+  return { effectiveStartISO, generatedUntilISO, entries };
+}
+
+function buildDefaultFitGuide(centerDateISO = todayISO()): PatternFitGuideDay[] {
+  return Array.from({ length: 11 }).map((_, index) => {
+    const offset = index - 5;
+    return {
+      dateISO: addDaysISO(centerDateISO, offset),
+      offset,
+      code: null,
+    };
+  });
+}
+
+function fitOffsetLabel(offset: number): string {
+  if (offset === 0) return 'Heute';
+  if (offset === -1) return 'Gestern';
+  if (offset === 1) return 'Morgen';
+  return offset > 0 ? `+${offset}` : String(offset);
+}
+
+function timestampOf(value: string | undefined): number {
+  const time = value ? Date.parse(value) : 0;
+  return Number.isFinite(time) ? time : 0;
+}
+
+function mergePatternVaults(
+  localVault: ShiftPatternTemplate[] | undefined,
+  remoteVault: ShiftPatternTemplate[] | undefined
+): ShiftPatternTemplate[] {
+  const byId = new Map<string, ShiftPatternTemplate>();
+  for (const item of remoteVault ?? []) {
+    if (item?.id) byId.set(item.id, item);
+  }
+  for (const item of localVault ?? []) {
+    if (!item?.id) continue;
+    const existing = byId.get(item.id);
+    if (!existing || timestampOf(item.updatedAt) >= timestampOf(existing.updatedAt)) {
+      byId.set(item.id, item);
+    }
+  }
+  return Array.from(byId.values()).sort((a, b) => timestampOf(b.updatedAt) - timestampOf(a.updatedAt));
 }
 
 // ─── Calendar Helper ──────────────────────────────────────────────────────────
@@ -112,13 +221,20 @@ export default function SetupScreen() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [currentSpaceId, setCurrentSpaceIdState] = useState<string | null>(null);
+  const [patternVault, setPatternVault] = useState<ShiftPatternTemplate[]>([]);
+  const [vaultName, setVaultName] = useState('');
+  const [vaultBusy, setVaultBusy] = useState(false);
+  const [fitModalVisible, setFitModalVisible] = useState(false);
+  const [fitTemplate, setFitTemplate] = useState<ShiftPatternTemplate | null>(null);
+  const [fitGuideDays, setFitGuideDays] = useState<PatternFitGuideDay[]>(() => buildDefaultFitGuide());
+  const [selectedFitDateISO, setSelectedFitDateISO] = useState<string>(todayISO());
+  const [selectedPatternTodayIndex, setSelectedPatternTodayIndex] = useState<number | null>(null);
 
   // Eingaben
   const [startDate, setStartDate] = useState(todayISO());
   const [cycleLength, setCycleLength] = useState(100);
   const [cycleLengthInput, setCycleLengthInput] = useState('100');
-  const [repetitions, setRepetitions] = useState<number>(10);
-  const [retroFillEnabled, setRetroFillEnabled] = useState(true);
   const [pattern, setPattern] = useState<ShiftType[]>(Array(100).fill('R') as ShiftType[]);
   const [shiftMeta, setShiftMeta] = useState(SHIFT_META);
 
@@ -126,8 +242,6 @@ export default function SetupScreen() {
   const [savedState, setSavedState] = useState<{
     startDate: string;
     cycleLength: number;
-      repetitions: number;
-      retroFillEnabled: boolean;
       pattern: ShiftType[];
   } | null>(null);
 
@@ -135,8 +249,6 @@ export default function SetupScreen() {
   const hasUnsavedChanges = savedState
     ? startDate !== savedState.startDate ||
       cycleLength !== savedState.cycleLength ||
-      repetitions !== savedState.repetitions ||
-      retroFillEnabled !== savedState.retroFillEnabled ||
       JSON.stringify(pattern.slice(0, cycleLength)) !== JSON.stringify(savedState.pattern.slice(0, savedState.cycleLength))
     : true;
 
@@ -187,31 +299,40 @@ export default function SetupScreen() {
       getProfile().then(async (p) => {
         if (!active) return;
         setProfile(p);
+        const activeSpaceId = await getCurrentSpaceId();
+        if (!active) return;
+        setCurrentSpaceIdState(activeSpaceId);
+        if (activeSpaceId) {
+          let vault: ShiftPatternTemplate[] = [];
+          try {
+            vault = p
+              ? await pullLatestPatternVault(p.id, activeSpaceId)
+              : await getSpaceShiftPatternVault(activeSpaceId);
+          } catch {
+            vault = await getSpaceShiftPatternVault(activeSpaceId);
+          }
+          if (!active) return;
+          setPatternVault(vault);
+        } else {
+          setPatternVault([]);
+        }
         if (p) {
           const overrides = await getShiftColorOverrides(p.id);
           setShiftMeta(buildShiftMetaWithOverrides(overrides));
-          const existing = await getShiftPlan(p.id);
+          const existing = activeSpaceId
+            ? await getShiftPlanForSpace(activeSpaceId, p.id)
+            : await getShiftPlan(p.id);
           if (existing) {
             const anchor = existing.anchorDateISO ?? existing.startDateISO;
             setStartDate(anchor);
             const cl = existing.cycleLengthDays || existing.pattern.length;
             setCycleLength(cl);
             setCycleLengthInput(String(cl));
-            // Repetition aus entries ableiten (entry count / 7)
-            const r = Math.round(existing.entries.length / 7);
-            if (REPETITION_OPTIONS.includes(r as typeof REPETITION_OPTIONS[number])) {
-              setRepetitions(r);
-            } else {
-              setRepetitions(10);
-            }
             setPattern(existing.pattern);
-            setRetroFillEnabled(existing.anchorDateISO ? existing.anchorDateISO !== existing.startDateISO : true);
             // Initialisiere savedState für Dirty-Tracking
             setSavedState({
               startDate: anchor,
               cycleLength: cl,
-              repetitions: r,
-              retroFillEnabled: existing.anchorDateISO ? existing.anchorDateISO !== existing.startDateISO : true,
               pattern: existing.pattern,
             });
           } else {
@@ -219,8 +340,6 @@ export default function SetupScreen() {
             setCycleLength(100);
             setCycleLengthInput('100');
             setPattern(Array(100).fill('R') as ShiftType[]);
-            setRepetitions(10);
-            setRetroFillEnabled(true);
           }
         }
         setPreview(null);
@@ -229,6 +348,298 @@ export default function SetupScreen() {
       return () => { active = false; };
     }, [])
   );
+
+  useFocusEffect(
+    useCallback(() => {
+      if (!profile?.id || !currentSpaceId) return () => {};
+      let active = true;
+      const refresh = async () => {
+        try {
+          const vault = await pullLatestPatternVault(profile.id, currentSpaceId);
+          if (active) setPatternVault(vault);
+        } catch {
+          // Offline/Backend-Probleme dürfen den lokalen Schichtprofil-Screen nicht blockieren.
+        }
+      };
+      const intervalId = setInterval(refresh, VAULT_REFRESH_MS);
+      return () => {
+        active = false;
+        clearInterval(intervalId);
+      };
+    }, [currentSpaceId, profile?.id])
+  );
+
+  async function pullLatestPatternVault(profileId: string, spaceId: string): Promise<ShiftPatternTemplate[]> {
+    const remoteSpaces = await pullSpacesForProfile(profileId);
+    const remoteSpace = remoteSpaces.find((space) => space.id === spaceId);
+    const remoteRuleProfile = remoteSpace?.spaceRuleProfile ?? null;
+    if (!remoteRuleProfile) {
+      return getSpaceShiftPatternVault(spaceId);
+    }
+
+    const localRuleProfile = await getSpaceRuleProfile(spaceId);
+    const mergedVault = mergePatternVaults(
+      localRuleProfile?.shiftPatternVault,
+      remoteRuleProfile.shiftPatternVault
+    );
+    const mergedRuleProfile = {
+      ...remoteRuleProfile,
+      ...(localRuleProfile && timestampOf(localRuleProfile.updatedAt) > timestampOf(remoteRuleProfile.updatedAt)
+        ? localRuleProfile
+        : {}),
+      shiftPatternVault: mergedVault,
+      updatedAt: new Date(
+        Math.max(timestampOf(localRuleProfile?.updatedAt), timestampOf(remoteRuleProfile.updatedAt))
+      ).toISOString(),
+    };
+
+    await persistSyncedRuleProfile(mergedRuleProfile);
+
+    const localSpaces = await getSpaces();
+    const hasLocalSpace = localSpaces.some((space) => space.id === spaceId);
+    const nextSpaces = hasLocalSpace
+      ? localSpaces.map((space) =>
+          space.id === spaceId ? { ...space, spaceRuleProfile: mergedRuleProfile } : space
+        )
+      : [...localSpaces, { ...remoteSpace!, spaceRuleProfile: mergedRuleProfile }];
+    await setSpaces(nextSpaces);
+
+    return mergedVault;
+  }
+
+  async function pushLatestPatternVault(profileId: string, spaceId: string): Promise<ShiftPatternTemplate[]> {
+    const localSpaces = await getSpaces();
+    const syncResult = await syncTeamSpaces(profileId, localSpaces);
+    await setSpaces(syncResult.spaces);
+
+    const syncedSpace = syncResult.spaces.find((space) => space.id === spaceId);
+    if (syncedSpace?.spaceRuleProfile) {
+      await persistSyncedRuleProfile(syncedSpace.spaceRuleProfile);
+      return syncedSpace.spaceRuleProfile.shiftPatternVault ?? [];
+    }
+
+    return getSpaceShiftPatternVault(spaceId);
+  }
+
+  async function refreshPatternVault(spaceId: string) {
+    const vault = await getSpaceShiftPatternVault(spaceId);
+    setPatternVault(vault);
+  }
+
+  async function handleSavePatternTemplate() {
+    if (!profile) return;
+    if (!currentSpaceId) {
+      Alert.alert('Kein aktiver Space', 'Bitte aktiviere zuerst einen Space, bevor du dein Schichtmuster speicherst.');
+      return;
+    }
+    const activeSpaceId = currentSpaceId;
+    if (!currentSpaceId) {
+      Alert.alert('Hinweis', 'Du brauchst einen aktiven Space, um ein Schichtmuster im Vault zu speichern.');
+      return;
+    }
+    const cleanName = vaultName.trim();
+    if (!cleanName) {
+      Alert.alert('Fehler', 'Bitte gib einen Namen für das Schichtmuster ein.');
+      return;
+    }
+    const patternSlice = pattern.slice(0, cycleLength);
+    if (patternSlice.every((code) => code === 'R')) {
+      Alert.alert('Fehler', 'Das Muster enthält nur Ruhetage. Bitte zuerst ein Schichtmuster eintragen.');
+      return;
+    }
+    setVaultBusy(true);
+    try {
+      try {
+        await pullLatestPatternVault(profile.id, currentSpaceId);
+      } catch {
+        // Speichern bleibt auch bei transientem Pull-Fehler möglich.
+      }
+      await upsertSpaceShiftPatternTemplate(currentSpaceId, {
+        name: cleanName,
+        pattern: patternSlice,
+        cycleLengthDays: cycleLength,
+        createdByProfileId: profile.id,
+        createdByDisplayName: profile.displayName,
+      });
+      const vault = await pushLatestPatternVault(profile.id, currentSpaceId);
+      setPatternVault(vault);
+      setVaultName('');
+      Alert.alert('Gespeichert', 'Schichtmuster wurde im Space-Vault gespeichert.');
+    } catch (e) {
+      Alert.alert('Fehler', 'Schichtmuster konnte nicht gespeichert werden.');
+    } finally {
+      setVaultBusy(false);
+    }
+  }
+
+  function normalizeTemplatePattern(template: ShiftPatternTemplate): ShiftType[] {
+    const normalizedLength = clampCycle(template.cycleLengthDays);
+    return template.pattern
+      .slice(0, normalizedLength)
+      .map((code) => (SHIFT_SEQUENCE.includes(code as ShiftType) ? (code as ShiftType) : 'R'));
+  }
+
+  function buildFitCandidates(template: ShiftPatternTemplate): PatternFitCandidate[] {
+    const normalizedLength = clampCycle(template.cycleLengthDays);
+    const normalizedPattern = normalizeTemplatePattern(template);
+    const centerDateISO = todayISO();
+    const knownDays = fitGuideDays.filter((day) => day.code != null);
+    if (knownDays.length === 0) return [];
+
+    return normalizedPattern
+      .map((_, index) => {
+        const candidateStart = addDaysISO(centerDateISO, -index);
+        let matches = 0;
+        let mismatches = 0;
+        for (const knownDay of knownDays) {
+          const diff = diffDaysUTC(candidateStart, knownDay.dateISO);
+          const patternIndex = ((diff % normalizedLength) + normalizedLength) % normalizedLength;
+          if (normalizedPattern[patternIndex] === knownDay.code) {
+            matches += 1;
+          } else {
+            mismatches += 1;
+          }
+        }
+        const preview = fitGuideDays.map((day) => {
+          const dateISO = day.dateISO;
+          const diff = diffDaysUTC(candidateStart, dateISO);
+          const patternIndex = ((diff % normalizedLength) + normalizedLength) % normalizedLength;
+          return { dateISO, code: normalizedPattern[patternIndex] };
+        });
+        return {
+          key: `${template.id}-${index}-${candidateStart}`,
+          patternIndex: index,
+          startDateISO: candidateStart,
+          matches,
+          mismatches,
+          knownCount: knownDays.length,
+          scorePct: Math.round((matches / knownDays.length) * 100),
+          preview,
+        };
+      })
+      .sort((a, b) =>
+        b.scorePct - a.scorePct ||
+        a.mismatches - b.mismatches ||
+        b.matches - a.matches ||
+        a.patternIndex - b.patternIndex
+      )
+      .slice(0, 8);
+  }
+
+  function openPatternFitModal(template: ShiftPatternTemplate) {
+    const centerDateISO = todayISO();
+    setFitTemplate(template);
+    setFitGuideDays(buildDefaultFitGuide(centerDateISO));
+    setSelectedFitDateISO(centerDateISO);
+    setSelectedPatternTodayIndex(null);
+    setFitModalVisible(true);
+  }
+
+  function cycleFitGuideDay(dateISO: string) {
+    const cycle: Array<ShiftType | null> = [null, ...SHIFT_SEQUENCE];
+    setSelectedFitDateISO(dateISO);
+    setFitGuideDays((prev) =>
+      prev.map((day) => {
+        if (day.dateISO !== dateISO) return day;
+        const currentIndex = cycle.findIndex((code) => code === day.code);
+        const nextCode = cycle[(currentIndex + 1) % cycle.length];
+        return { ...day, code: nextCode };
+      })
+    );
+  }
+
+  function setFitGuideDay(dateISO: string, code: ShiftType | null) {
+    setSelectedFitDateISO(dateISO);
+    setFitGuideDays((prev) =>
+      prev.map((day) => (day.dateISO === dateISO ? { ...day, code } : day))
+    );
+  }
+
+  function handleApplyPatternTemplate(template: ShiftPatternTemplate, candidate: PatternFitCandidate) {
+    const normalizedLength = clampCycle(template.cycleLengthDays);
+    const normalizedPattern = normalizeTemplatePattern(template);
+    setCycleLength(normalizedLength);
+    setCycleLengthInput(String(normalizedLength));
+    setPattern(() => {
+      const base = normalizedPattern.length > 0 ? normalizedPattern : Array(normalizedLength).fill('R');
+      if (base.length >= normalizedLength) return base.slice(0, normalizedLength) as ShiftType[];
+      return [...base, ...Array(normalizedLength - base.length).fill('R')] as ShiftType[];
+    });
+    setStartDate(candidate.startDateISO);
+    setDateError('');
+    setPreview(candidate.preview);
+    setFitModalVisible(false);
+  }
+
+  function handleApplyPatternTemplateByTodayIndex() {
+    if (!fitTemplate || selectedPatternTodayIndex == null) return;
+    const normalizedLength = clampCycle(fitTemplate.cycleLengthDays);
+    const normalizedPattern = normalizeTemplatePattern(fitTemplate);
+    const today = todayISO();
+    const anchorDateISO = addDaysISO(today, -selectedPatternTodayIndex);
+    const preview = buildDefaultFitGuide(today).map((day) => {
+      const diff = diffDaysUTC(anchorDateISO, day.dateISO);
+      const patternIndex = ((diff % normalizedLength) + normalizedLength) % normalizedLength;
+      return { dateISO: day.dateISO, code: normalizedPattern[patternIndex] };
+    });
+
+    handleApplyPatternTemplate(fitTemplate, {
+      key: `${fitTemplate.id}-manual-today-${selectedPatternTodayIndex}`,
+      patternIndex: selectedPatternTodayIndex,
+      startDateISO: anchorDateISO,
+      matches: 1,
+      mismatches: 0,
+      knownCount: 1,
+      scorePct: 100,
+      preview,
+    });
+  }
+
+  function handleAutoAnchorPatternTemplate() {
+    if (!fitTemplate) return;
+    const bestCandidate = buildFitCandidates(fitTemplate)[0];
+    if (!bestCandidate) {
+      Alert.alert(
+        'Noch keine Dienste gewählt',
+        'Bitte trage mindestens einen sicheren Dienst im Zeitraum Heute +/- 5 Tage ein.'
+      );
+      return;
+    }
+
+    if (bestCandidate.mismatches > 0) {
+      Alert.alert(
+        'Kein perfekter Treffer',
+        `YASA findet ${bestCandidate.matches}/${bestCandidate.knownCount} passende Tage. Bitte prüfe die eingetragenen Dienste oder übernimm den besten Treffer.`,
+        [
+          { text: 'Prüfen', style: 'cancel' },
+          {
+            text: 'Besten Treffer übernehmen',
+            onPress: () => handleApplyPatternTemplate(fitTemplate, bestCandidate),
+          },
+        ]
+      );
+      return;
+    }
+
+    handleApplyPatternTemplate(fitTemplate, bestCandidate);
+  }
+
+  async function handleDeletePatternTemplate(template: ShiftPatternTemplate) {
+    if (!profile || !currentSpaceId) return;
+    setVaultBusy(true);
+    try {
+      try {
+        await pullLatestPatternVault(profile.id, currentSpaceId);
+      } catch {
+        // Löschen arbeitet notfalls mit dem lokalen Stand weiter.
+      }
+      await deleteSpaceShiftPatternTemplate(currentSpaceId, template.id);
+      const vault = await pushLatestPatternVault(profile.id, currentSpaceId);
+      setPatternVault(vault);
+    } finally {
+      setVaultBusy(false);
+    }
+  }
 
   // Wenn cycleLength sich ändert, Pattern anpassen
   function handleCycleChange(len: number) {
@@ -325,7 +736,11 @@ export default function SetupScreen() {
       return;
     }
     const patternSlice = pattern.slice(0, cycleLength);
-    const entries = generateShiftEntries(startDate, patternSlice, repetitions);
+    const { entries } = buildShiftPlanEntriesForPlanningWindow({
+      anchorDateISO: startDate,
+      pattern: patternSlice,
+      cycleLengthDays: cycleLength,
+    });
     // Zeige nur die nächsten 14 ab heute
     const today = todayISO();
     const future = entries.filter((e) => e.dateISO >= today).slice(0, 14);
@@ -340,43 +755,33 @@ export default function SetupScreen() {
       return;
     }
     if (!profile) return;
+    if (!currentSpaceId) {
+      Alert.alert('Kein aktiver Space', 'Bitte aktiviere zuerst einen Space, bevor du dein Schichtmuster speicherst.');
+      return;
+    }
+    const activeSpaceId = currentSpaceId;
     setSaving(true);
     try {
       const patternSlice = pattern.slice(0, cycleLength);
-      const retroWindowStart = addDaysISO(todayISO(), -RETRO_WINDOW_DAYS);
-      let effectiveStartISO = startDate;
-      if (retroFillEnabled && cycleLength > 0) {
-        const backSpan = Math.max(0, diffDaysUTC(retroWindowStart, startDate));
-        if (backSpan > 0) {
-          const cyclesBack = Math.ceil(backSpan / cycleLength);
-          effectiveStartISO = addDaysISO(startDate, -(cyclesBack * cycleLength));
-        }
-      }
-      const forwardEndISO = addDaysISO(startDate, repetitions * 7 - 1);
-      const totalDays = Math.max(
-        repetitions * 7,
-        diffDaysUTC(effectiveStartISO, forwardEndISO) + 1
-      );
-      const weeksNeeded = Math.ceil(totalDays / 7);
-      const entries = generateShiftEntries(effectiveStartISO, patternSlice, weeksNeeded)
-        .filter((entry) => entry.dateISO <= forwardEndISO);
-      const untilDate = entries.length > 0 ? entries[entries.length - 1].dateISO : startDate;
+      const { effectiveStartISO, generatedUntilISO, entries } = buildShiftPlanEntriesForPlanningWindow({
+        anchorDateISO: startDate,
+        pattern: patternSlice,
+        cycleLengthDays: cycleLength,
+      });
       const plan: UserShiftPlan = {
         profileId: profile.id,
         startDateISO: effectiveStartISO,
         anchorDateISO: startDate,
         pattern: patternSlice,
         cycleLengthDays: cycleLength,
-        generatedUntilISO: untilDate,
+        generatedUntilISO,
         entries,
       };
-      await saveShiftPlan(plan);
+      await saveShiftPlanForSpace(activeSpaceId, plan);
       // Update savedState nach erfolgreichem Speichern
     setSavedState({
       startDate,
       cycleLength,
-      repetitions,
-      retroFillEnabled,
       pattern: patternSlice,
     });
     router.replace('/(shift)/calendar');
@@ -425,6 +830,15 @@ export default function SetupScreen() {
   // Zykluslänge weggeklickt hat oder kein Muster erkannt wurde.
   const subPatternHint =
     dismissedHintLen === cycleLength ? null : detectSubPattern(patternSlice);
+  const selectedFitDay = fitGuideDays.find((day) => day.dateISO === selectedFitDateISO) ?? fitGuideDays[5];
+  const selectedFitMeta = selectedFitDay?.code ? shiftMeta[selectedFitDay.code] : null;
+  const knownFitGuideCount = fitGuideDays.filter((day) => day.code != null).length;
+  const canAutoAnchorPattern = knownFitGuideCount > 0;
+  const fitTemplatePattern = fitTemplate ? normalizeTemplatePattern(fitTemplate) : [];
+  const selectedPatternTodayCode =
+    selectedPatternTodayIndex == null ? null : fitTemplatePattern[selectedPatternTodayIndex] ?? null;
+  const selectedPatternTodayMeta = selectedPatternTodayCode ? shiftMeta[selectedPatternTodayCode] : null;
+  const canApplyPatternByTodayIndex = fitTemplate != null && selectedPatternTodayIndex != null;
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -651,38 +1065,81 @@ export default function SetupScreen() {
         )}
       </View>
 
-      {/* ── Dauer ──────────────────────────────────────────────────── */}
+      {/* ── Planungszeitraum ───────────────────────────────────────── */}
       <View style={styles.section}>
-        <Text style={styles.sectionLabel}>Generieren für</Text>
-        <View style={styles.optionRowWrap}>
-          {REPETITION_OPTIONS.map((opt) => (
-            <TouchableOpacity
-              key={opt}
-              style={[styles.optionBtnSmall, repetitions === opt && styles.optionBtnActive]}
-              onPress={() => { setRepetitions(opt); setPreview(null); }}
-            >
-              <Text style={[styles.optionBtnText, repetitions === opt && styles.optionBtnTextActive]}>
-                {opt}x
-              </Text>
-            </TouchableOpacity>
-          ))}
+        <Text style={styles.sectionLabel}>Planungszeitraum</Text>
+        <View style={styles.planWindowCard}>
+          <Text style={styles.planWindowTitle}>{buildPlanWindowLabel()}</Text>
+          <Text style={styles.planWindowText}>
+            YASA rollt dein Muster automatisch vom Anfang des vergangenen Jahres bis zum Ende des nächsten Jahres aus.
+          </Text>
         </View>
-        <Text style={styles.optionHint}>Wiederholung (Mal)</Text>
+        <Text style={styles.optionHint}>
+          Damit ist das komplette nächste Jahr für Urlaubsvorplanung sichtbar.
+        </Text>
       </View>
 
+      {/* ── Schichtmuster-Vault ───────────────────────────────────── */}
       <View style={styles.section}>
-        <Text style={styles.sectionLabel}>Kalender-Rückblick</Text>
-        <TouchableOpacity
-          style={[styles.retroToggleBtn, retroFillEnabled && styles.retroToggleBtnActive]}
-          onPress={() => setRetroFillEnabled((prev) => !prev)}
-        >
-          <Text style={[styles.retroToggleText, retroFillEnabled && styles.retroToggleTextActive]}>
-            {retroFillEnabled ? 'Aktiv: Muster wird rückwirkend übertragen' : 'Aus: nur ab Startdatum'}
+        <Text style={styles.sectionLabel}>Schichtmuster</Text>
+        <View style={styles.vaultCard}>
+          <Text style={styles.vaultTitle}>Space-Schichtmuster Vault</Text>
+          <Text style={styles.vaultHint}>
+            Host und Mitglieder können Muster hinterlegen. Neue User wählen ein Muster und setzen nur noch das Startdatum.
           </Text>
-        </TouchableOpacity>
-        <Text style={styles.optionHint}>
-          Bei aktivem Modus werden vergangene Tage im Kalender passend zum Zyklus ergänzt.
-        </Text>
+          {!currentSpaceId ? (
+            <Text style={styles.vaultOffline}>Kein aktiver Space – Vault aktuell nicht verfügbar.</Text>
+          ) : null}
+
+          <View style={styles.vaultInputRow}>
+            <TextInput
+              style={styles.vaultInput}
+              value={vaultName}
+              onChangeText={setVaultName}
+              placeholder="Name für aktuelles Muster (z. B. AOCC Standard N)"
+              placeholderTextColor={colors.textTertiary}
+            />
+            <TouchableOpacity
+              style={[styles.vaultSaveBtn, (vaultBusy || !currentSpaceId) && styles.saveBtnDisabled]}
+              onPress={handleSavePatternTemplate}
+              disabled={vaultBusy || !currentSpaceId}
+            >
+              <Text style={styles.vaultSaveBtnText}>Speichern</Text>
+            </TouchableOpacity>
+          </View>
+
+          <View style={styles.vaultList}>
+            {patternVault.length === 0 ? (
+              <Text style={styles.vaultEmpty}>Noch kein Schichtmuster im Vault.</Text>
+            ) : (
+              patternVault.map((item) => (
+                <View key={item.id} style={styles.vaultItem}>
+                  <TouchableOpacity
+                    style={styles.vaultApplyBtn}
+                    onPress={() => openPatternFitModal(item)}
+                    disabled={vaultBusy}
+                  >
+                    <Text style={styles.vaultItemTitle}>{item.name}</Text>
+                    <Text style={styles.vaultItemMeta}>
+                      {item.cycleLengthDays} Tage · von {item.createdByDisplayName || 'Unbekannt'}
+                    </Text>
+                    <Text style={styles.vaultItemPattern}>
+                      {item.pattern.join(' · ')}
+                    </Text>
+                    <Text style={styles.vaultApplyHint}>Tippen zum geführten Einrasten</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.vaultDeleteBtn}
+                    onPress={() => handleDeletePatternTemplate(item)}
+                    disabled={vaultBusy}
+                  >
+                    <Text style={styles.vaultDeleteText}>Löschen</Text>
+                  </TouchableOpacity>
+                </View>
+              ))
+            )}
+          </View>
+        </View>
       </View>
 
       {/* ── Vorschau-Button ────────────────────────────────────────── */}
@@ -740,6 +1197,89 @@ export default function SetupScreen() {
       >
         <Text style={styles.backBtnText}>Abbrechen</Text>
       </TouchableOpacity>
+
+      {/* ── Schichtmuster einrasten ───────────────────────────────── */}
+      <Modal
+        visible={fitModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setFitModalVisible(false)}
+      >
+        <Pressable style={styles.modalOverlay} onPress={() => setFitModalVisible(false)}>
+          <Pressable style={styles.fitModal} onPress={() => {}}>
+            <ScrollView
+              contentContainerStyle={styles.fitModalContent}
+              showsVerticalScrollIndicator={false}
+              bounces={false}
+            >
+              <Text style={styles.fitTitle}>Muster einrasten</Text>
+              <Text style={styles.fitSubtitle}>
+                {fitTemplate?.name ?? 'Schichtmuster'}
+              </Text>
+              <Text style={styles.fitBody}>
+                Tippe im ausgewaehlten Muster auf den Chip, der deinem heutigen Dienst entspricht.
+                YASA setzt genau diese Musterposition auf heute und fuellt den Kalender daraus.
+              </Text>
+
+              <Text style={styles.fitLabel}>Vollständiges Schichtmuster</Text>
+              <Text style={styles.fitMiniHint}>
+                Die Nummer zeigt die Position im Muster. Markiere genau einen Chip als „Heute“.
+              </Text>
+              <View style={styles.fitPatternGrid}>
+                {fitTemplatePattern.map((code, index) => {
+                  const meta = shiftMeta[code];
+                  const isSelected = selectedPatternTodayIndex === index;
+                  return (
+                    <TouchableOpacity
+                      key={`${code}-${index}`}
+                      style={[
+                        styles.fitPatternChip,
+                        isSelected && styles.fitPatternChipSelected,
+                        { backgroundColor: meta.bg, borderColor: isSelected ? colors.primary : meta.bg },
+                      ]}
+                      onPress={() => setSelectedPatternTodayIndex(index)}
+                    >
+                      <Text style={[styles.fitPatternChipIndex, { color: meta.fg }]}>
+                        {index + 1}
+                      </Text>
+                      <Text style={[styles.fitPatternChipText, { color: meta.fg }]}>
+                        {meta.label}
+                      </Text>
+                      {isSelected && <Text style={styles.fitPatternTodayFlag}>Heute</Text>}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+
+              <View style={styles.fitSelectedPanel}>
+                <Text style={styles.fitSelectedTitle}>
+                  Heute im Muster
+                </Text>
+                <Text style={styles.fitSelectedMeta}>
+                  {selectedPatternTodayIndex == null
+                    ? 'Noch nicht markiert. Bitte tippe oben auf den heutigen Muster-Chip.'
+                    : `Position ${selectedPatternTodayIndex + 1} · ${selectedPatternTodayMeta?.label ?? selectedPatternTodayCode}`}
+                </Text>
+              </View>
+
+              <TouchableOpacity
+                style={[styles.fitAnchorBtn, !canApplyPatternByTodayIndex && styles.fitAnchorBtnDisabled]}
+                onPress={handleApplyPatternTemplateByTodayIndex}
+                disabled={!canApplyPatternByTodayIndex}
+              >
+                <Text style={styles.fitAnchorBtnText}>Dienstplan-Muster anwenden</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.calCloseBtn}
+                onPress={() => setFitModalVisible(false)}
+              >
+                <Text style={styles.calCloseBtnText}>Abbrechen</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* ── Kalender-Modal ──────────────────────────────────────────── */}
       <Modal visible={showCalendar} transparent animationType="fade" onRequestClose={() => setShowCalendar(false)}>
@@ -872,6 +1412,106 @@ const styles = StyleSheet.create({
     width: '100%',
     marginBottom: 24,
   },
+  vaultCard: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    backgroundColor: colors.backgroundSecondary,
+    padding: 12,
+    gap: 10,
+  },
+  vaultTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  vaultHint: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 18,
+  },
+  vaultOffline: {
+    fontSize: 12,
+    color: colors.warningDark,
+    fontWeight: '600',
+  },
+  vaultInputRow: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'center',
+  },
+  vaultInput: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    backgroundColor: colors.backgroundTertiary,
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    color: colors.textPrimary,
+    fontSize: 13,
+  },
+  vaultSaveBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  vaultSaveBtnText: {
+    color: colors.textInverse,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  vaultList: {
+    gap: 8,
+  },
+  vaultEmpty: {
+    fontSize: 12,
+    color: colors.textTertiary,
+    fontStyle: 'italic',
+  },
+  vaultItem: {
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    borderRadius: 10,
+    backgroundColor: colors.background,
+    overflow: 'hidden',
+  },
+  vaultApplyBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 10,
+    gap: 4,
+  },
+  vaultItemTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  vaultItemMeta: {
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  vaultItemPattern: {
+    fontSize: 12,
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  vaultApplyHint: {
+    fontSize: 11,
+    color: colors.textTertiary,
+  },
+  vaultDeleteBtn: {
+    borderTopWidth: 1,
+    borderTopColor: colors.borderLight,
+    paddingVertical: 8,
+    alignItems: 'center',
+    backgroundColor: colors.backgroundTertiary,
+  },
+  vaultDeleteText: {
+    fontSize: 12,
+    color: colors.error,
+    fontWeight: '700',
+  },
   sectionLabel: {
     fontSize: 13,
     fontWeight: '700',
@@ -970,6 +1610,25 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.textTertiary,
     marginTop: 6,
+  },
+  planWindowCard: {
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: 10,
+    backgroundColor: colors.primaryBackground,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+  },
+  planWindowTitle: {
+    fontSize: 14,
+    color: colors.primary,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  planWindowText: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    lineHeight: 19,
   },
   retroToggleBtn: {
     borderWidth: 1,
@@ -1252,6 +1911,303 @@ const styles = StyleSheet.create({
     padding: 20,
     width: '90%',
     maxWidth: 360,
+  },
+  fitModal: {
+    backgroundColor: colors.background,
+    borderRadius: 16,
+    width: '92%',
+    maxWidth: 390,
+    maxHeight: '88%',
+    overflow: 'hidden',
+  },
+  fitModalContent: {
+    padding: 18,
+    paddingBottom: 20,
+  },
+  fitTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  fitSubtitle: {
+    fontSize: 13,
+    color: colors.primary,
+    fontWeight: '700',
+    marginBottom: 8,
+  },
+  fitBody: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    lineHeight: 19,
+    marginBottom: 12,
+  },
+  fitLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 7,
+    marginTop: 8,
+  },
+  fitMiniHint: {
+    fontSize: 12,
+    color: colors.textTertiary,
+    lineHeight: 17,
+    marginBottom: 8,
+  },
+  fitGuideList: {
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    borderRadius: 12,
+    backgroundColor: colors.backgroundSecondary,
+    marginBottom: 10,
+  },
+  fitGuideRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderLight,
+  },
+  fitGuideRowToday: {
+    backgroundColor: colors.primaryBackground,
+  },
+  fitGuideRowSelected: {
+    borderLeftWidth: 4,
+    borderLeftColor: colors.primary,
+    backgroundColor: colors.background,
+  },
+  fitGuideDateCol: {
+    flex: 1,
+  },
+  fitGuideOffset: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+  fitGuideOffsetToday: {
+    color: colors.primary,
+  },
+  fitGuideDate: {
+    fontSize: 11,
+    color: colors.textTertiary,
+    marginTop: 2,
+  },
+  fitGuideCodeBtn: {
+    minWidth: 54,
+    borderWidth: 1,
+    borderRadius: 9,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    alignItems: 'center',
+  },
+  fitGuideCodeBtnSelected: {
+    borderWidth: 2,
+  },
+  fitGuideCodeText: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  fitGuideClearBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    backgroundColor: colors.backgroundTertiary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fitGuideClearText: {
+    fontSize: 13,
+    color: colors.textTertiary,
+    fontWeight: '800',
+  },
+  fitShiftGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 8,
+  },
+  fitSelectedPanel: {
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    borderRadius: 12,
+    backgroundColor: colors.backgroundSecondary,
+    padding: 10,
+    marginBottom: 10,
+  },
+  fitSelectedTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.textPrimary,
+    marginBottom: 2,
+  },
+  fitSelectedMeta: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginBottom: 8,
+  },
+  fitPatternGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 12,
+  },
+  fitPatternChip: {
+    width: 58,
+    minHeight: 54,
+    borderWidth: 1.5,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 5,
+    paddingHorizontal: 4,
+  },
+  fitPatternChipSelected: {
+    borderWidth: 3,
+    transform: [{ scale: 1.04 }],
+  },
+  fitPatternChipIndex: {
+    fontSize: 10,
+    fontWeight: '800',
+    opacity: 0.72,
+    marginBottom: 2,
+  },
+  fitPatternChipText: {
+    fontSize: 14,
+    fontWeight: '900',
+  },
+  fitPatternTodayFlag: {
+    marginTop: 2,
+    fontSize: 9,
+    fontWeight: '900',
+    color: colors.primary,
+    backgroundColor: colors.background,
+    borderRadius: 7,
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    overflow: 'hidden',
+  },
+  fitShiftBtn: {
+    borderWidth: 1.5,
+    borderRadius: 8,
+    backgroundColor: colors.backgroundTertiary,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+  fitShiftBtnActive: {
+    backgroundColor: colors.primaryBackground,
+  },
+  fitShiftText: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  fitShiftTextActive: {
+    color: colors.primary,
+  },
+  fitProgressText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    marginTop: 2,
+    marginBottom: 2,
+    fontWeight: '700',
+  },
+  fitEmpty: {
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    borderRadius: 8,
+    backgroundColor: colors.backgroundTertiary,
+    padding: 10,
+    color: colors.textSecondary,
+    fontSize: 13,
+    marginTop: 6,
+    marginBottom: 8,
+  },
+  fitAnchorBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: 10,
+    paddingVertical: 13,
+    alignItems: 'center',
+    marginTop: 10,
+  },
+  fitAnchorBtnDisabled: {
+    opacity: 0.5,
+  },
+  fitAnchorBtnText: {
+    color: colors.textInverse,
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  fitCandidateList: {
+    maxHeight: 300,
+    marginTop: 4,
+  },
+  fitCandidate: {
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+    borderRadius: 10,
+    backgroundColor: colors.backgroundSecondary,
+    padding: 10,
+    marginBottom: 8,
+  },
+  fitCandidateBest: {
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryBackground,
+  },
+  fitCandidateTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginBottom: 3,
+  },
+  fitCandidateMeta: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    marginBottom: 8,
+  },
+  fitPreviewScroller: {
+    marginBottom: 8,
+  },
+  fitPreviewRow: {
+    flexDirection: 'row',
+    gap: 5,
+  },
+  fitPreviewDay: {
+    width: 42,
+    alignItems: 'center',
+    gap: 3,
+    borderRadius: 7,
+    padding: 3,
+  },
+  fitPreviewDayMismatch: {
+    backgroundColor: '#FEE2E2',
+  },
+  fitPreviewDate: {
+    fontSize: 10,
+    color: colors.textTertiary,
+    fontWeight: '700',
+  },
+  fitPreviewBadge: {
+    width: '100%',
+    minHeight: 26,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  fitPreviewBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  fitApplyText: {
+    fontSize: 12,
+    color: colors.primary,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   calMonthRow: {
     flexDirection: 'row',

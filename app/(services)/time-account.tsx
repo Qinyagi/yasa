@@ -12,18 +12,29 @@ import { useRouter } from 'expo-router';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import {
   getProfile, getSpaces, getCurrentSpaceId,
-  getSpaceRuleProfile, getUserTimeAccountProfile,
+  getSpaceRuleProfile, persistSyncedRuleProfile,
+  getUserTimeAccountProfileForSpace,
+  getVacationDaysForSpace,
   getTimeClockQaCalendar,
-  getShiftPlan, getTimeClockConfigOrDefault, getTimeClockEvents,
-  setUserTimeAccountProfile,
+  getShiftPlanForSpace, getTimeClockConfigOrDefault, getTimeClockEvents,
+  getUserTimeBudgetProfile, setUserTimeBudgetProfile,
+  setUserTimeAccountProfileForSpace,
+  buildSpaceProfileKey,
+  setSpaces,
+  setCurrentSpaceId,
 } from '../../lib/storage';
+import { syncTeamSpaces } from '../../lib/backend/teamSync';
+import { logInfo, logWarn, logError } from '../../lib/log';
 import type { UserProfile } from '../../types';
 import type { UserShiftPlan, UserTimeClockConfig, TimeClockEvent } from '../../types';
 import type { SpaceRuleProfile, UserTimeAccountProfile, WorkModel } from '../../types/timeAccount';
 import { WORK_MODEL_LABELS } from '../../types/timeAccount';
 import { computeMonthlyWorkProgress } from '../../lib/timeAccountEngine';
+import { shiftCodeAtDate } from '../../lib/shiftEngine';
+import { computeWDaysForRange } from '../../lib/wDayEngine';
 import { BUNDESLAND_LABELS, isBundeslandSupported } from '../../data/schoolHolidays';
 import type { Bundesland } from '../../data/schoolHolidays';
+import { getHolidayMap } from '../../data/holidays';
 import { colors, typography, spacing, borderRadius, accessibility } from '../../constants/theme';
 import { Button } from '../../components/Button';
 
@@ -42,6 +53,8 @@ export default function TimeAccountScreen() {
 
   const [loading,       setLoading]       = useState(true);
   const [saving,        setSaving]        = useState(false);
+  const [syncOffline,   setSyncOffline]   = useState(false);
+  const [ruleSyncDebug, setRuleSyncDebug] = useState<string>('');
   const [profile,       setProfile]       = useState<UserProfile | null>(null);
   const [spaceProfile,  setSpaceProfile]  = useState<SpaceRuleProfile | null>(null);
   const [monthExplanationExpanded, setMonthExplanationExpanded] = useState(false);
@@ -54,7 +67,14 @@ export default function TimeAccountScreen() {
   const [weeklyHours,        setWeeklyHours]        = useState('38.5');
   const [workModel,          setWorkModel]          = useState<WorkModel>('standard');
   const [openingBalance,     setOpeningBalance]     = useState('0');
+  const [vacationDaysBal,    setVacationDaysBal]    = useState('0');
+  const [annualVacationEntitlement, setAnnualVacationEntitlement] = useState('0');
+  const [wDaysBal,           setWDaysBal]           = useState('0');
+  const [glzHoursBal,        setGlzHoursBal]        = useState('0');
+  const [fzgaHoursBal,       setFzgaHoursBal]       = useState('0');
+  const [vzgaHoursBal,       setVzgaHoursBal]       = useState('0');
   const [schoolOverride,     setSchoolOverride]     = useState<boolean | null>(null);
+  const [vacationDaysTakenYear, setVacationDaysTakenYear] = useState(0);
   // null = Space-Default
 
   useFocusEffect(
@@ -65,31 +85,114 @@ export default function TimeAccountScreen() {
         if (!active) return;
         setProfile(p);
 
-        if (spaceId) {
-          const sr = await getSpaceRuleProfile(spaceId);
-          if (active) setSpaceProfile(sr);
+        // On member devices the space metadata can lag behind.
+        // Pull latest spaces on focus so rule profile visibility is up-to-date.
+        let syncFailed = false;
+        let spacesAfterSync = await getSpaces();
+        if (p) {
+          try {
+            const localSpaces = await getSpaces();
+            logInfo('RULESYNC', 'syncTeamSpaces start', { profileId: p.id, activeSpaceId: spaceId });
+            const syncResult = await syncTeamSpaces(p.id, localSpaces, { allowCached: true });
+            if (active) {
+              await setSpaces(syncResult.spaces);
+              spacesAfterSync = syncResult.spaces;
+              logInfo('RULESYNC', 'syncTeamSpaces OK', {
+                pulled: syncResult.pulledCount,
+                pushed: syncResult.pushedCount,
+              });
+            }
+          } catch (err) {
+            syncFailed = true;
+            logError('RULESYNC', 'syncTeamSpaces failed – using local state', err);
+          }
+        }
+        if (active) setSyncOffline(syncFailed);
+
+        let resolvedSpaceId: string | null = spaceId;
+        const memberSpaces =
+          p != null
+            ? spacesAfterSync.filter((s) => s.memberProfiles.some((m) => m.id === p.id))
+            : [];
+
+        if (resolvedSpaceId) {
+          const validActive = memberSpaces.some((s) => s.id === resolvedSpaceId);
+          if (!validActive) resolvedSpaceId = null;
         }
 
+        // Auto-heal for users with exactly one member space
+        if (!resolvedSpaceId && memberSpaces.length === 1) {
+          resolvedSpaceId = memberSpaces[0].id;
+          await setCurrentSpaceId(resolvedSpaceId);
+          logInfo('RULESYNC', 'auto-healed currentSpaceId (single member space)', {
+            resolvedSpaceId,
+          });
+        }
+
+        let sr: SpaceRuleProfile | null = null;
+        if (resolvedSpaceId) {
+          sr = await getSpaceRuleProfile(resolvedSpaceId);
+        }
+
+        // With multiple Spaces YASA must not silently switch the active Space.
+        // The user chooses the active work context explicitly in the Space/Admin flow.
+
+        if (resolvedSpaceId) {
+          logInfo('RULESYNC', 'getSpaceRuleProfile result', {
+            spaceId: resolvedSpaceId,
+            hasProfile: sr != null,
+            source: syncFailed ? 'local/fallback' : 'post-sync',
+          });
+        }
+        const debugParts: string[] = [];
+        debugParts.push(`active=${resolvedSpaceId ?? 'none'}`);
+        debugParts.push(`memberSpaces=${memberSpaces.length}`);
+        for (const s of memberSpaces.slice(0, 5)) {
+          const has = (await getSpaceRuleProfile(s.id)) ? 'Y' : 'N';
+          debugParts.push(`${s.id.slice(0, 8)}:${has}`);
+        }
+        if (active) setRuleSyncDebug(debugParts.join(' | '));
+
+        // Persist synced rule profile to dedicated storage for offline resilience
+        if (sr && !syncFailed) {
+          await persistSyncedRuleProfile(sr);
+        }
+        if (active) setSpaceProfile(sr);
+
         if (p) {
+          const storageProfileId = resolvedSpaceId ? buildSpaceProfileKey(resolvedSpaceId, p.id) : p.id;
           const [plan, cfg, events] = await Promise.all([
-            getShiftPlan(p.id),
-            getTimeClockConfigOrDefault(p.id),
-            getTimeClockEvents(p.id),
+            resolvedSpaceId ? getShiftPlanForSpace(resolvedSpaceId, p.id) : Promise.resolve(null),
+            getTimeClockConfigOrDefault(storageProfileId),
+            getTimeClockEvents(storageProfileId),
           ]);
-          const qaMap = await getTimeClockQaCalendar(p.id);
+          const vacationDays = resolvedSpaceId ? await getVacationDaysForSpace(resolvedSpaceId, p.id) : [];
+          const qaMap = await getTimeClockQaCalendar(storageProfileId);
           if (active) {
             setShiftPlan(plan);
             setTimeConfig(cfg);
             setTimeEvents(events);
             setQaOverrides(qaMap);
+            const currentYear = new Date().getFullYear();
+            const used = vacationDays.filter((d) => d.startsWith(`${currentYear}-`)).length;
+            setVacationDaysTakenYear(used);
           }
 
-          const ur = await getUserTimeAccountProfile(p.id);
+          const ur = resolvedSpaceId ? await getUserTimeAccountProfileForSpace(resolvedSpaceId, p.id) : null;
+          const tb = await getUserTimeBudgetProfile(storageProfileId);
           if (active && ur) {
             setWeeklyHours(String(ur.weeklyHours));
             setWorkModel(ur.workModel);
             setOpeningBalance(String(ur.openingBalanceHours));
             setSchoolOverride(ur.schoolHolidaysEnabled ?? null);
+          }
+          if (active) {
+            setAnnualVacationEntitlement(String(tb.annualVacationEntitlementDays));
+            setVacationDaysBal(String(tb.vacationDays));
+            setWDaysBal(String(tb.wDays));
+            setGlzHoursBal(String(tb.glzHours));
+            setFzgaHoursBal(String(tb.fzgaHours));
+            setVzgaHoursBal(String(tb.vzgaHours));
           }
         }
         if (active) setLoading(false);
@@ -100,6 +203,11 @@ export default function TimeAccountScreen() {
 
   async function handleSave() {
     if (!profile) return;
+    const activeSpaceId = await getCurrentSpaceId();
+    if (!activeSpaceId) {
+      Alert.alert('Kein aktiver Space', 'Bitte aktiviere zuerst einen Space.');
+      return;
+    }
     const hours = parseFloat(weeklyHours);
     if (isNaN(hours) || hours <= 0 || hours > 60) {
       Alert.alert('Fehler', 'Bitte gib eine gültige Wochenarbeitszeit ein (1–60 Stunden).');
@@ -114,9 +222,19 @@ export default function TimeAccountScreen() {
       schoolHolidaysEnabled:  schoolOverride,
       updatedAt:              new Date().toISOString(),
     };
-    await setUserTimeAccountProfile(up);
+    await setUserTimeAccountProfileForSpace(activeSpaceId, up);
+    await setUserTimeBudgetProfile({
+      profileId: buildSpaceProfileKey(activeSpaceId, profile.id),
+      annualVacationEntitlementDays: parseFloat(annualVacationEntitlement) || 0,
+      vacationDays: parseFloat(vacationDaysBal) || 0,
+      wDays: parseFloat(wDaysBal) || 0,
+      glzHours: parseFloat(glzHoursBal) || 0,
+      fzgaHours: parseFloat(fzgaHoursBal) || 0,
+      vzgaHours: parseFloat(vzgaHoursBal) || 0,
+      updatedAt: new Date().toISOString(),
+    });
     setSaving(false);
-    Alert.alert('Gespeichert', 'Deine Zeitkonto-Einstellungen wurden gespeichert.');
+    Alert.alert('Gespeichert', 'Zeitkonto-Einstellungen und Zeitguthaben wurden gespeichert.');
   }
 
   if (loading) {
@@ -153,6 +271,62 @@ export default function TimeAccountScreen() {
   });
   const fmtHours = (value: number) => `${value.toFixed(2).replace('.', ',')} h`;
   const fmtSignedHours = (value: number) => `${value > 0 ? '+' : value < 0 ? '-' : ''}${Math.abs(value).toFixed(2).replace('.', ',')} h`;
+  const annualEntitlement = parseFloat(annualVacationEntitlement) || 0;
+  const annualRemaining = Math.max(0, annualEntitlement - vacationDaysTakenYear);
+  const currentYear = new Date().getFullYear();
+
+  const annualForesight = (() => {
+    if (!shiftPlan) {
+      return {
+        holidayPotentialHours: 0,
+        preHolidayPotentialHours: 0,
+        glzPotentialHours: 0,
+        wDayPotentialDays: 0,
+      };
+    }
+    const holidayMap = getHolidayMap(currentYear);
+    const regularCodes = new Set(['F', 'S', 'N', 'KS', 'KN', 'T']);
+    const entryByDate = new Map(shiftPlan.entries.map((e) => [e.dateISO, e.code] as const));
+    let holidayShiftCount = 0;
+    let preHolidayShiftCount = 0;
+    let regularShiftCount = 0;
+    const dateToIso = (date: Date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    const start = new Date(currentYear, 0, 1);
+    const end = new Date(currentYear, 11, 31);
+    for (let cursor = new Date(start); cursor <= end; cursor.setDate(cursor.getDate() + 1)) {
+      const dayISO = dateToIso(cursor);
+      const code =
+        entryByDate.get(dayISO) ??
+        shiftCodeAtDate(shiftPlan.startDateISO, shiftPlan.pattern, dayISO);
+      if (!code || !regularCodes.has(code)) continue;
+      regularShiftCount += 1;
+      if (holidayMap[dayISO]) holidayShiftCount += 1;
+      const next = new Date(cursor);
+      next.setDate(next.getDate() + 1);
+      const nextISO = dateToIso(next);
+      if (holidayMap[nextISO]) preHolidayShiftCount += 1;
+    }
+    const wDays = computeWDaysForRange({
+      plan: shiftPlan,
+      fromISO: `${currentYear}-01-01`,
+      toISO: `${currentYear}-12-31`,
+      qaDateOverrides: qaOverrides,
+      wEnabled: spaceProfile?.codeRules.W?.enabled ?? false,
+    });
+    return {
+      holidayPotentialHours: spaceProfile?.holidayCredit.enabled
+        ? holidayShiftCount * spaceProfile.holidayCredit.hoursPerHolidayShift
+        : 0,
+      preHolidayPotentialHours: spaceProfile?.preHolidayCredit.enabled
+        ? preHolidayShiftCount * spaceProfile.preHolidayCredit.hoursPerOccurrence
+        : 0,
+      // Foresight-Regel laut Produktvorgabe:
+      // jeder reguläre Dienst => 15 Min potenzielle GLZ = 0,25 h
+      glzPotentialHours: regularShiftCount * 0.25,
+      wDayPotentialDays: wDays.totalWDays,
+    };
+  })();
 
   return (
     <ScrollView contentContainerStyle={styles.container}>
@@ -208,6 +382,10 @@ export default function TimeAccountScreen() {
         <View style={styles.ruleRow}>
           <Text style={styles.ruleKey}>davon Vorfest</Text>
           <Text style={styles.ruleVal}>{fmtHours(monthlyProgress.creditedPreHolidayHoursToDate)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>W-Tage bisher</Text>
+          <Text style={styles.ruleVal}>{monthlyProgress.creditedWDaysToDate} Tage</Text>
         </View>
         <View style={styles.ruleRow}>
           <Text style={styles.ruleKey}>Gleitzeit angerechnet (Regel)</Text>
@@ -287,6 +465,120 @@ export default function TimeAccountScreen() {
         placeholderTextColor={colors.textTertiary}
       />
       <Text style={styles.fieldHint}>Positive Werte = Überstunden, negative = Schulden</Text>
+
+      <Text style={styles.fieldLabel}>Jährlicher Urlaubsanspruch (Tage)</Text>
+      <TextInput
+        style={styles.input}
+        value={annualVacationEntitlement}
+        onChangeText={setAnnualVacationEntitlement}
+        keyboardType="decimal-pad"
+        placeholder="z. B. 30"
+        placeholderTextColor={colors.textTertiary}
+      />
+
+      <Text style={styles.sectionTitle}>Zeitguthaben (manuell)</Text>
+      <Text style={styles.fieldHint}>
+        Diese Werte kannst du monatlich aus deinem Arbeitgeber-Konto übernehmen.
+      </Text>
+
+      <Text style={styles.fieldLabel}>Urlaubstage (U) · ganze Tage</Text>
+      <TextInput
+        style={styles.input}
+        value={vacationDaysBal}
+        onChangeText={setVacationDaysBal}
+        keyboardType="decimal-pad"
+        placeholder="z. B. 24"
+        placeholderTextColor={colors.textTertiary}
+      />
+
+      <Text style={styles.fieldLabel}>W-Tage (W) · ganze Tage</Text>
+      <TextInput
+        style={styles.input}
+        value={wDaysBal}
+        onChangeText={setWDaysBal}
+        keyboardType="decimal-pad"
+        placeholder="z. B. 6"
+        placeholderTextColor={colors.textTertiary}
+      />
+
+      <Text style={styles.fieldLabel}>Gleitzeitstunden (GLZ)</Text>
+      <TextInput
+        style={styles.input}
+        value={glzHoursBal}
+        onChangeText={setGlzHoursBal}
+        keyboardType="decimal-pad"
+        placeholder="z. B. 18.5 oder -3"
+        placeholderTextColor={colors.textTertiary}
+      />
+      <Text style={styles.fieldHint}>GLZ darf auch negativ sein.</Text>
+
+      <Text style={styles.sectionTitle}>Foresight Guthaben ({currentYear})</Text>
+      <View style={styles.ruleCard}>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Urlaub Anspruch gesamt</Text>
+          <Text style={styles.ruleVal}>{annualEntitlement.toFixed(0)} Tage</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Urlaub eingetragen</Text>
+          <Text style={styles.ruleVal}>{vacationDaysTakenYear} Tage</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>Urlaub Rest (Foresight)</Text>
+          <Text style={styles.ruleVal}>{annualRemaining.toFixed(0)} Tage</Text>
+        </View>
+        <View style={styles.ruleDivider} />
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>FZGA Potenzial (Jahr)</Text>
+          <Text style={styles.ruleVal}>{fmtHours(annualForesight.holidayPotentialHours)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>VZGA Potenzial (Jahr)</Text>
+          <Text style={styles.ruleVal}>{fmtHours(annualForesight.preHolidayPotentialHours)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>GLZ Potenzial (Jahr)</Text>
+          <Text style={styles.ruleVal}>{fmtHours(annualForesight.glzPotentialHours)}</Text>
+        </View>
+        <View style={styles.ruleRow}>
+          <Text style={styles.ruleKey}>W-Tage Potenzial</Text>
+          <Text style={styles.ruleVal}>{annualForesight.wDayPotentialDays} Tage</Text>
+        </View>
+
+        {vacationDaysTakenYear === 0 ? (
+          <View style={styles.ruleWarning}>
+            <Text style={styles.ruleWarningText}>
+              Hinweis: Noch kein Urlaub eingetragen.
+            </Text>
+          </View>
+        ) : null}
+        {annualEntitlement > 0 && vacationDaysTakenYear < annualEntitlement ? (
+          <View style={styles.ruleWarning}>
+            <Text style={styles.ruleWarningText}>
+              Hinweis: Urlaub unvollständig. Es fehlen noch {annualRemaining.toFixed(0)} Tage bis zum Anspruch.
+            </Text>
+          </View>
+        ) : null}
+      </View>
+
+      <Text style={styles.fieldLabel}>Feiertagsstunden (FZGA)</Text>
+      <TextInput
+        style={styles.input}
+        value={fzgaHoursBal}
+        onChangeText={setFzgaHoursBal}
+        keyboardType="decimal-pad"
+        placeholder="z. B. 12"
+        placeholderTextColor={colors.textTertiary}
+      />
+
+      <Text style={styles.fieldLabel}>Vorfeststunden (VZGA)</Text>
+      <TextInput
+        style={styles.input}
+        value={vzgaHoursBal}
+        onChangeText={setVzgaHoursBal}
+        keyboardType="decimal-pad"
+        placeholder="z. B. 4"
+        placeholderTextColor={colors.textTertiary}
+      />
 
       {/* Schulferien Override */}
       <Text style={styles.fieldLabel}>Schulferien im Kalender</Text>
@@ -378,12 +670,22 @@ export default function TimeAccountScreen() {
             </TouchableOpacity>
           ) : null}
         </View>
+      ) : syncOffline ? (
+        <View style={styles.ruleOffline}>
+          <Text style={styles.ruleOfflineText}>
+            Backend offline – letzter lokaler Stand wird angezeigt.{'\n'}
+            Kein Regelprofil lokal vorhanden. Bitte erneut öffnen, wenn eine Verbindung besteht.
+          </Text>
+        </View>
       ) : (
         <View style={styles.ruleEmpty}>
           <Text style={styles.ruleEmptyText}>
             Kein Regelprofil für diesen Space vorhanden.{'\n'}
             Ein Owner / Co-Admin kann es im Admin-Bereich hinterlegen.
           </Text>
+          {ruleSyncDebug ? (
+            <Text style={styles.ruleDebugText}>debug: {ruleSyncDebug}</Text>
+          ) : null}
         </View>
       )}
 
@@ -649,6 +951,28 @@ const styles = StyleSheet.create({
   ruleEmptyText: {
     fontSize: typography.fontSize.sm,
     color: colors.textSecondary,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  ruleDebugText: {
+    marginTop: spacing.xs,
+    fontSize: typography.fontSize.xs,
+    color: colors.textTertiary,
+    textAlign: 'center',
+    lineHeight: 18,
+  },
+  ruleOffline: {
+    backgroundColor: '#FEF3C7',
+    borderRadius: borderRadius.xl,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: '#FCD34D',
+  },
+  ruleOfflineText: {
+    fontSize: typography.fontSize.sm,
+    color: '#92400E',
     textAlign: 'center',
     lineHeight: 22,
   },

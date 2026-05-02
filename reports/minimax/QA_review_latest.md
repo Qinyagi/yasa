@@ -138,6 +138,29 @@ This is a direct pass-through of `timeAccountEngine.ts:244` which computes `work
 - `zeitkontoEngine.ts:142` — `creditedTariffHoursTotal` sourced from `monthSummary.creditedHoursToDate` = holiday + preholiday only (NOT including flex)
 - `zeitkontoEngine.ts:143` — `balanceToDate` sourced from `monthSummary.totalDeltaWithCreditsToDate` = delta + tariffCredits (NOT flex)
 
+---
+
+## Update – 2026-04-14 (Manual Device QA Delta)
+
+### Runtime checks executed
+- GLZ foresight parity:
+  - Device A: `65.00 h`
+  - Device B: `65.00 h`
+  - Result: **PASS**
+
+- X-day rendering regression:
+  - `Schichten & Tagesbilanz`: X day visible as `Frei genommen`
+  - `Letzte Stempelzeiten`: X row visible, time shown as `—`
+  - Result: **PASS** (with one ordering issue below)
+
+### New/remaining findings
+1. **FAIL (Open):** Member `Services -> Zeitkonto` still shows missing Space rule profile (`Kein Regelprofil ...`) although host profile exists.
+2. **FAIL (Open):** `Schichten & Tagesbilanz` ordering for X-only rows is not strictly chronological.
+
+### Gate status for next session
+- No new blocker on GLZ foresight or X-labeling behavior.
+- Follow-up required for rule-profile visibility + chronological ordering.
+
 **Test Z9:** With `deltaHoursToDate=0`, `creditedHoursToDate=0`, `creditedFlexHoursToDate=3.0`, `totalDeltaWithCreditsToDate=0` → `balanceToDate=0`, `projectedEndBalance=0`, `creditedFlexHours=3.0`. Flex tracked separately, NOT in balance. ✅
 
 ### 3.3 Holiday/Preholiday credits remain explicit and separate

@@ -11,8 +11,14 @@ import {
 import { useRouter } from 'expo-router';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { getProfile, getSpaces, joinSpace, importSpaceFromInvite } from '../../lib/storage';
+import { getProfile, getSpaces, joinSpace, importSpaceFromInvite, saveShiftPlanForSpace, setProfile } from '../../lib/storage';
+import {
+  buildTransferredShiftPlan,
+  parseProfileTransferPayload,
+  type ProfileTransferPayload,
+} from '../../lib/profileTransfer';
 import { colors, typography, spacing, borderRadius, accessibility } from '../../constants/theme';
+import type { UserProfile } from '../../types';
 
 // ─── Payload Parser ────────────────────────────────────────────────────────────
 
@@ -80,6 +86,7 @@ export default function JoinScreen() {
   // Confirmation Modal
   const [modalVisible, setModalVisible] = useState(false);
   const [pendingPayload, setPendingPayload] = useState<InvitePayload | null>(null);
+  const [pendingTransfer, setPendingTransfer] = useState<ProfileTransferPayload | null>(null);
   const [spaceName, setSpaceName] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
 
@@ -90,6 +97,7 @@ export default function JoinScreen() {
       lastScan.current = null;
       setModalVisible(false);
       setPendingPayload(null);
+      setPendingTransfer(null);
       setSpaceName(null);
     }, [])
   );
@@ -100,6 +108,15 @@ export default function JoinScreen() {
     if (!scanning || lastScan.current === data) return;
     lastScan.current = data;
     setScanning(false);
+
+    const transferPayload = parseProfileTransferPayload(data);
+    if (transferPayload) {
+      setSpaceName(transferPayload.spaceName);
+      setPendingTransfer(transferPayload);
+      setPendingPayload(null);
+      setModalVisible(true);
+      return;
+    }
 
     const payload = parseInvitePayload(data);
     if (!payload) {
@@ -121,15 +138,85 @@ export default function JoinScreen() {
     
     setSpaceName(displayName);
     setPendingPayload(payload);
+    setPendingTransfer(null);
     setModalVisible(true);
   }
 
   // ── Beitritt bestätigen ────────────────────────────────────────────────────
   async function handleConfirmJoin() {
-    if (!pendingPayload) return;
+    if (!pendingPayload && !pendingTransfer) return;
     setJoining(true);
 
     const profile = await getProfile();
+
+    if (pendingTransfer) {
+      if (profile && profile.id !== pendingTransfer.profileId) {
+        Alert.alert(
+          'Profil bereits vorhanden',
+          'Dieses Gerät hat bereits ein ID-Profil. Ein Transfer-QR kann nur auf einem Gerät ohne bestehendes Profil übernommen werden.',
+          [
+            {
+              text: 'Erneut scannen',
+              onPress: () => {
+                setJoining(false);
+                setModalVisible(false);
+                setPendingTransfer(null);
+                setScanning(true);
+                lastScan.current = null;
+              },
+            },
+            { text: 'Abbrechen', onPress: handleBack },
+          ]
+        );
+        return;
+      }
+
+      const transferredProfile: UserProfile =
+        profile ??
+        {
+          id: pendingTransfer.profileId,
+          displayName: pendingTransfer.displayName,
+          avatarUrl: pendingTransfer.avatarUrl,
+          createdAt: pendingTransfer.createdAt ?? new Date().toISOString(),
+        };
+
+      if (!profile) {
+        await setProfile(transferredProfile);
+      }
+
+      const result = await importSpaceFromInvite(
+        {
+          spaceId: pendingTransfer.spaceId,
+          name: pendingTransfer.spaceName,
+          ownerProfileId: pendingTransfer.ownerProfileId,
+          ownerDisplayName: pendingTransfer.ownerDisplayName,
+          ownerAvatarUrl: pendingTransfer.ownerAvatarUrl,
+          inviteToken: pendingTransfer.inviteToken,
+        },
+        transferredProfile
+      );
+
+      if (result.ok) {
+        if (pendingTransfer.assignedPattern) {
+          await saveShiftPlanForSpace(
+            pendingTransfer.spaceId,
+            buildTransferredShiftPlan(transferredProfile.id, pendingTransfer.assignedPattern)
+          );
+        }
+        setModalVisible(false);
+        router.replace('/(space)/choose');
+      } else {
+        setJoining(false);
+        setModalVisible(false);
+        Alert.alert('Transfer fehlgeschlagen', result.reason, [
+          { text: 'Erneut scannen', onPress: () => { setScanning(true); lastScan.current = null; } },
+          { text: 'Abbrechen', onPress: handleBack },
+        ]);
+      }
+      return;
+    }
+
+    if (!pendingPayload) return;
     if (!profile) {
       Alert.alert('Fehler', 'Kein Profil gefunden. Bitte erstelle zuerst ein ID-Profil.');
       setJoining(false);
@@ -187,6 +274,7 @@ export default function JoinScreen() {
   function handleCancelJoin() {
     setModalVisible(false);
     setPendingPayload(null);
+    setPendingTransfer(null);
     setSpaceName(null);
     setScanning(true);
     lastScan.current = null;
@@ -276,7 +364,13 @@ export default function JoinScreen() {
       >
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>Space beitreten?</Text>
+            <Text style={styles.modalTitle}>
+              {pendingTransfer ? 'ID-Profil übernehmen?' : 'Space beitreten?'}
+            </Text>
+
+            {pendingTransfer && (
+              <Text style={styles.modalProfileName}>„{pendingTransfer.displayName}"</Text>
+            )}
 
             {spaceName ? (
               <Text style={styles.modalSpaceName}>„{spaceName}"</Text>
@@ -287,7 +381,9 @@ export default function JoinScreen() {
             )}
 
             <Text style={styles.modalHint}>
-              Du wirst als Mitglied hinzugefügt.
+              {pendingTransfer
+                ? 'Profil und Space werden auf diesem Gerät eingerichtet.'
+                : 'Du wirst als Mitglied hinzugefügt.'}
             </Text>
 
             <View style={styles.modalButtonRow}>
@@ -307,7 +403,9 @@ export default function JoinScreen() {
                 {joining ? (
                   <ActivityIndicator color="#fff" size="small" />
                 ) : (
-                  <Text style={styles.modalButtonText}>Beitreten</Text>
+                  <Text style={styles.modalButtonText}>
+                    {pendingTransfer ? 'Übernehmen' : 'Beitreten'}
+                  </Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -496,6 +594,13 @@ const styles = StyleSheet.create({
     fontWeight: typography.fontWeight.semibold,
     color: colors.primary,
     marginBottom: spacing.sm,
+    textAlign: 'center',
+  },
+  modalProfileName: {
+    fontSize: typography.fontSize.lg,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.textPrimary,
+    marginBottom: spacing.xs,
     textAlign: 'center',
   },
   modalSpaceUnknown: {

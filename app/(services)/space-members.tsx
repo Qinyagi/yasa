@@ -46,7 +46,7 @@ export default function SpaceMembersReadonlyScreen() {
   const [space, setSpace] = useState<Space | null>(null);
   const [ghosts, setGhosts] = useState<UserProfile[]>([]);
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (allowCachedSync = false) => {
     const [p, currentSpaceId, localSpaces] = await Promise.all([
       getProfile(),
       getCurrentSpaceId(),
@@ -63,7 +63,11 @@ export default function SpaceMembersReadonlyScreen() {
 
     let spaces = localSpaces;
     try {
-      const syncResult = await syncTeamSpaces(p.id, localSpaces);
+      const syncResult = await syncTeamSpaces(
+        p.id,
+        localSpaces,
+        allowCachedSync ? { allowCached: true, ttlMs: 10_000 } : {}
+      );
       spaces = syncResult.spaces;
       await setSpaces(spaces);
     } catch {
@@ -89,7 +93,7 @@ export default function SpaceMembersReadonlyScreen() {
     useCallback(() => {
       let active = true;
       setLoading(true);
-      loadData().finally(() => {
+      loadData(true).finally(() => {
         if (!active) return;
       });
       return () => {

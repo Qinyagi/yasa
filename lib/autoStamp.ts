@@ -21,6 +21,8 @@ import {
   getTimeClockConfigOrDefault,
   getTimeClockEvents,
   getShiftForDate,
+  getShiftForDateForSpace,
+  buildSpaceProfileKey,
   addTimeClockEvent,
   deriveTimeClockStampState,
   formatDateISO,
@@ -70,10 +72,11 @@ function weekdayLabelDE(dateISO: string): string {
  */
 export async function autoStampMissedShifts(
   profileId: string,
-  options?: { nowOverride?: Date }
+  options?: { nowOverride?: Date; spaceId?: string | null }
 ): Promise<number> {
   const now = options?.nowOverride ?? new Date();
-  const config = await getTimeClockConfigOrDefault(profileId);
+  const storageProfileId = options?.spaceId ? buildSpaceProfileKey(options.spaceId, profileId) : profileId;
+  const config = await getTimeClockConfigOrDefault(storageProfileId);
   let created = 0;
 
   // Monatlicher Rückblick: von gestern (daysBack=1) bis Monatsanfang (daysBack=getDate()-1).
@@ -88,7 +91,9 @@ export async function autoStampMissedShifts(
     );
     const dateISO = formatDateISO(date);
 
-    const shiftCode = await getShiftForDate(profileId, dateISO);
+    const shiftCode = options?.spaceId
+      ? await getShiftForDateForSpace(options.spaceId, profileId, dateISO)
+      : await getShiftForDate(profileId, dateISO);
     if (!isRegularShiftCode(shiftCode)) continue;
 
     const settings = config.shiftSettings[shiftCode];
@@ -109,7 +114,7 @@ export async function autoStampMissedShifts(
     if (now <= cutoff) continue;
 
     // Events neu einlesen (wir haben ggf. in einem früheren Schleifendurchlauf Events hinzugefügt)
-    const events = await getTimeClockEvents(profileId);
+    const events = await getTimeClockEvents(storageProfileId);
     const shiftEvents = events.filter(
       (e) => e.dateISO === dateISO && e.shiftCode === shiftCode
     );
@@ -122,7 +127,7 @@ export async function autoStampMissedShifts(
 
     if (stampState.phase === 'awaiting_check_in') {
       // Beide Stempelzeiten fehlen → Kommen + Gehen zum nominalen Schichtzeitpunkt
-      await addTimeClockEvent(profileId, {
+      await addTimeClockEvent(storageProfileId, {
         dateISO,
         weekdayLabel: weekdayLabelDE(dateISO),
         shiftCode,
@@ -130,7 +135,7 @@ export async function autoStampMissedShifts(
         timestampISO: startAt.toISOString(),
         source: 'auto_placeholder',
       });
-      await addTimeClockEvent(profileId, {
+      await addTimeClockEvent(storageProfileId, {
         dateISO,
         weekdayLabel: weekdayLabelDE(dateISO),
         shiftCode,
@@ -141,7 +146,7 @@ export async function autoStampMissedShifts(
       created += 2;
     } else if (stampState.phase === 'awaiting_check_out') {
       // Kommen vorhanden, Gehen fehlt → nur Gehen zum nominalen Schichtende
-      await addTimeClockEvent(profileId, {
+      await addTimeClockEvent(storageProfileId, {
         dateISO,
         weekdayLabel: weekdayLabelDE(dateISO),
         shiftCode,

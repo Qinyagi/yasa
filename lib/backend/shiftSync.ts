@@ -8,12 +8,19 @@ type ShiftPlanRow = {
 };
 
 export async function pushShiftPlanToBackend(plan: UserShiftPlan): Promise<void> {
+  return pushShiftPlanToBackendKey(plan.profileId, plan);
+}
+
+export async function pushShiftPlanToBackendKey(
+  storageProfileId: string,
+  plan: UserShiftPlan
+): Promise<void> {
   await ensureAnonymousSession();
   const supabase = getSupabaseClient();
 
   const { error } = await supabase.from('shift_plans').upsert(
     {
-      profile_id: plan.profileId,
+      profile_id: storageProfileId,
       plan_json: plan,
     },
     { onConflict: 'profile_id' }
@@ -24,9 +31,15 @@ export async function pushShiftPlanToBackend(plan: UserShiftPlan): Promise<void>
 export async function pullShiftPlansByProfileIds(
   profileIds: string[]
 ): Promise<Record<string, UserShiftPlan>> {
+  return pullShiftPlansByStorageKeys(profileIds);
+}
+
+export async function pullShiftPlansByStorageKeys(
+  storageProfileIds: string[]
+): Promise<Record<string, UserShiftPlan>> {
   await ensureAnonymousSession();
   const supabase = getSupabaseClient();
-  const uniqueIds = Array.from(new Set(profileIds.filter(Boolean)));
+  const uniqueIds = Array.from(new Set(storageProfileIds.filter(Boolean)));
   if (uniqueIds.length === 0) return {};
 
   const { data, error } = await supabase
@@ -43,4 +56,3 @@ export async function pullShiftPlansByProfileIds(
   }
   return result;
 }
-

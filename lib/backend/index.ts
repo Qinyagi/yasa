@@ -5,3 +5,4 @@ export * from './health';
 export * from './teamSync';
 export * from './shiftSync';
 export * from './realtimeMembers';
+export * from './spaceStatusSync';

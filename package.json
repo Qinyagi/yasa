@@ -6,13 +6,14 @@
     "ops:checkpoint": "powershell -ExecutionPolicy Bypass -File scripts/ops/save_session_checkpoint.ps1",
     "ops:resume": "powershell -ExecutionPolicy Bypass -File scripts/ops/resume_session.ps1",
     "ops:install-autocheckpoint": "powershell -ExecutionPolicy Bypass -File scripts/ops/install_session_automation.ps1",
+    "ops:android:release-install": "powershell -ExecutionPolicy Bypass -File scripts/ops/build_install_android_release.ps1",
     "typecheck": "tsc --noEmit",
-    "test": "sucrase-node lib/__tests__/shiftEngine.test.ts && sucrase-node lib/__tests__/timeclock.test.ts && sucrase-node lib/__tests__/strategyEngine.test.ts && sucrase-node lib/__tests__/timeAccountEngine.test.ts && sucrase-node lib/__tests__/avatarSeed.test.ts && sucrase-node lib/__tests__/memberSync.test.ts && sucrase-node lib/__tests__/realtimeMembers.test.ts && sucrase-node lib/__tests__/ghostPresenceSync.test.ts",
+    "test": "sucrase-node lib/__tests__/shiftEngine.test.ts && sucrase-node lib/__tests__/timeclock.test.ts && sucrase-node lib/__tests__/timeclockCases.test.ts && sucrase-node lib/__tests__/zeitkontoEngine.test.ts && sucrase-node lib/__tests__/wDayEngine.test.ts && sucrase-node lib/__tests__/strategyEngine.test.ts && sucrase-node lib/__tests__/timeAccountEngine.test.ts && sucrase-node lib/__tests__/vacationPlanningEngine.test.ts && sucrase-node lib/__tests__/avatarSeed.test.ts && sucrase-node lib/__tests__/memberSync.test.ts && sucrase-node lib/__tests__/realtimeMembers.test.ts && sucrase-node lib/__tests__/ghostPresenceSync.test.ts && sucrase-node lib/__tests__/profileTransfer.test.ts && sucrase-node lib/__tests__/preparedProfilesShiftpals.test.ts",
     "qa:e2e:navigation": "powershell -ExecutionPolicy Bypass -File scripts/qa/run_maestro_navigation.ps1",
     "qa:e2e:timeclock": "powershell -ExecutionPolicy Bypass -File scripts/qa/run_maestro_timeclock.ps1",
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
     "web": "expo start --web"
   },
   "dependencies": {

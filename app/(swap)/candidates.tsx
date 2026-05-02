@@ -15,6 +15,7 @@ import {
   getSpaces,
   getCurrentSpaceId,
   getAllShiftPlans,
+  getShiftPlanFromMapForSpace,
   todayISO,
   isValidISODate,
 } from '../../lib/storage';
@@ -138,7 +139,7 @@ export default function CandidatesScreen() {
         }
 
         // Eigene Schicht am gewählten Tag
-        const myPlan = allPlans[p.id];
+        const myPlan = getShiftPlanFromMapForSpace(allPlans, currentSpaceId, p.id);
         const myEntry = myPlan?.entries.find((e) => e.dateISO === dateISO);
         if (active) setMyShift(myEntry?.code ?? null);
 
@@ -149,7 +150,7 @@ export default function CandidatesScreen() {
         for (const member of activeSpace.memberProfiles) {
           if (member.id === p.id) continue; // eigenes Profil überspringen
 
-          const memberPlan = allPlans[member.id];
+          const memberPlan = getShiftPlanFromMapForSpace(allPlans, currentSpaceId, member.id);
           if (!memberPlan) {
             withoutPlan++;
             continue;
@@ -363,7 +364,8 @@ function shiftLabel(code: ShiftType): string {
     T: 'Tagesdienst',
     KS: 'Kurzer Spätdienst',
     KN: 'Kurzer Nachtdienst',
-    K: 'Kurzer Dienst',
+    K: 'Krank',
+    EK: 'entschuldigt Krank',
     R: 'Ruhe',
     U: 'Urlaub',
     X: 'Frei',
@@ -379,7 +381,8 @@ function shiftBadgeStyle(code: ShiftType): object {
     T: { backgroundColor: '#FFF7ED' },
     KS: { backgroundColor: '#FFE4E6' },
     KN: { backgroundColor: '#E0E7FF' },
-    K: { backgroundColor: '#FDF2F8' },
+    K: { backgroundColor: '#FEE2E2' },
+    EK: { backgroundColor: '#FFEDD5' },
     R: { backgroundColor: '#F3F4F6' },
     U: { backgroundColor: '#ECFDF5' },
     X: { backgroundColor: '#F5F5F4' },
@@ -395,7 +398,8 @@ function shiftTextStyle(code: ShiftType): object {
     T: { color: '#C2410C' },
     KS: { color: '#BE123C' },
     KN: { color: '#3730A3' },
-    K: { color: '#BE185D' },
+    K: { color: '#B91C1C' },
+    EK: { color: '#C2410C' },
     R: { color: '#6B7280' },
     U: { color: '#059669' },
     X: { color: '#78716C' },

@@ -23,21 +23,26 @@ import { Button } from '../../components/Button';
 import { BottomActionBar } from '../../components/BottomActionBar';
 import {
   getProfile,
-  getShiftPlan,
+  getShiftPlanForSpace,
   getAllShiftPlans,
+  getShiftPlanFromMapForSpace,
   getShiftColorOverrides,
   getCurrentSpaceId,
   listGhosts,
   todayISO,
-  getVacationDays,
-  toggleVacationDay,
+  getVacationDaysForSpace,
+  getVacationPlanningBudgetSummary,
+  toggleVacationDayForSpace,
+  getVacationPlanningDaysForProfile,
+  toggleVacationPlanningDay,
   getSpaceRuleProfile,
-  getUserTimeAccountProfile,
+  getUserTimeAccountProfileForSpace,
   getTimeAccountUiState,
   setTimeAccountUiState,
-  getShiftOverrides,
-  toggleShiftOverride,
-  getDayChanges,
+  getShiftOverridesForSpace,
+  setShiftOverrideForSpace,
+  getDayChangesForSpace,
+  buildSpaceProfileKey,
   isValidISODate,
   type DayChange,
 } from '../../lib/storage';
@@ -60,12 +65,14 @@ import type {
   UserTimeAccountProfile,
   TimeAccountSummary,
 } from '../../types/timeAccount';
+import type { VacationPlanningBudgetSummary } from '../../types/vacationPlanning';
 import type { UserProfile, UserShiftPlan, ShiftType } from '../../types';
 
 // ─── Konstanten ──────────────────────────────────────────────────────────────
 
-const MONTHS_BEFORE = 12;
-const MONTHS_AFTER = 12;
+const CALENDAR_WINDOW_NOW = new Date();
+const MONTHS_BEFORE = CALENDAR_WINDOW_NOW.getMonth() + 12;
+const MONTHS_AFTER = 23 - CALENDAR_WINDOW_NOW.getMonth();
 const TOTAL_MONTHS = MONTHS_BEFORE + 1 + MONTHS_AFTER;
 const TODAY_INDEX = MONTHS_BEFORE;
 
@@ -135,6 +142,60 @@ function generateMonthGrid(year: number, month: number): DayCell[] {
   return cells;
 }
 
+function weekdayIndexMondayFirst(dateISO: string): number {
+  const [y, m, d] = dateISO.split('-').map(Number);
+  const weekday = new Date(y, m - 1, d).getDay();
+  return weekday === 0 ? 6 : weekday - 1;
+}
+
+function plusDaysISO(dateISO: string, days: number): string {
+  const [y, m, d] = dateISO.split('-').map(Number);
+  const next = new Date(y, m - 1, d);
+  next.setDate(next.getDate() + days);
+  return toISO(next.getFullYear(), next.getMonth() + 1, next.getDate());
+}
+
+function isPreHolidayDate(
+  dateISO: string,
+  holidayMap: Record<string, Holiday>
+): boolean {
+  return !!holidayMap[plusDaysISO(dateISO, 1)];
+}
+
+function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+  const normalized = hex.replace('#', '').trim();
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) return null;
+  return {
+    r: parseInt(normalized.slice(0, 2), 16),
+    g: parseInt(normalized.slice(2, 4), 16),
+    b: parseInt(normalized.slice(4, 6), 16),
+  };
+}
+
+function relativeLuminance(hex: string): number {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return 0;
+  const channels = [rgb.r, rgb.g, rgb.b].map((value) => {
+    const srgb = value / 255;
+    return srgb <= 0.03928 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const l1 = relativeLuminance(foreground);
+  const l2 = relativeLuminance(background);
+  const lighter = Math.max(l1, l2);
+  const darker = Math.min(l1, l2);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function pickReadableTextColor(background: string): string {
+  const dark = '#111827';
+  const light = '#FFFFFF';
+  return contrastRatio(dark, background) >= contrastRatio(light, background) ? dark : light;
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface GhostDayEntry {
@@ -156,15 +217,18 @@ export default function CalendarScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{
     dateISO?: string;
+    preselectAction?: string;
     returnMonthKey?: string;
     suppressTaModal?: string;
     returnToken?: string;
+    returnTo?: string;
   }>();
   const flatListRef = useRef<FlatList>(null);
   const pendingTargetIndexRef = useRef<number | null>(null);
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [plan, setPlan] = useState<UserShiftPlan | null>(null);
+  const [currentSpaceId, setCurrentSpaceId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [currentIndex, setCurrentIndex] = useState(TODAY_INDEX);
 
@@ -175,6 +239,10 @@ export default function CalendarScreen() {
   // Vacation planning
   const [vacationMode, setVacationMode] = useState(false);
   const [vacationDays, setVacationDays] = useState<Set<string>>(new Set());
+  const [vacationPlanningDays, setVacationPlanningDays] = useState<Set<string>>(new Set());
+  const [vacationPlanningBudget, setVacationPlanningBudget] =
+    useState<VacationPlanningBudgetSummary | null>(null);
+  const planningBudgetPulse = useRef(new Animated.Value(0)).current;
 
   // Shift Override (einmalige Änderungen)
   const [overrideMode, setOverrideMode] = useState(false);
@@ -191,6 +259,11 @@ export default function CalendarScreen() {
   const [userTaProfile,     setUserTaProfile]     = useState<UserTimeAccountProfile | null>(null);
   const [taSummary,         setTaSummary]         = useState<TimeAccountSummary | null>(null);
   const [showTaModal,       setShowTaModal]       = useState(false);
+  const [showActionsModal,  setShowActionsModal]  = useState(false);
+  const [showCalendarSignals, setShowCalendarSignals] = useState(false);
+  const [showWDays, setShowWDays] = useState(false);
+  const [showHolidaySignals, setShowHolidaySignals] = useState(false);
+  const [showPreHolidaySignals, setShowPreHolidaySignals] = useState(false);
 
   // Holiday map (computed once)
   const holidayMap = useMemo(() => {
@@ -237,6 +310,25 @@ export default function CalendarScreen() {
     return result;
   }, []);
 
+  const calendarReturnTarget =
+    typeof params.returnTo === 'string' && params.returnTo.startsWith('/')
+      ? params.returnTo
+      : '/';
+  const calendarReturnLabel =
+    calendarReturnTarget === '/(services)/vacation-planning'
+      ? 'Zurück zur Urlaubsvorplanung'
+      : 'Zurück zum Start';
+  const shouldPreselectVacationPlanning =
+    params.preselectAction === 'vacationPlanning' &&
+    calendarReturnTarget === '/(services)/vacation-planning';
+
+  function handleCalendarBack() {
+    if (shouldPreselectVacationPlanning) {
+      setVacationMode(false);
+    }
+    router.replace(calendarReturnTarget as `/${string}`);
+  }
+
   function getTargetIndexFromParams(): number | null {
     const focusDateISO = typeof params.dateISO === 'string' ? params.dateISO : undefined;
     const monthKey = typeof params.returnMonthKey === 'string' ? params.returnMonthKey : undefined;
@@ -272,6 +364,10 @@ export default function CalendarScreen() {
       if (params.suppressTaModal === '1') {
         suppressTaModalNextAutoShow = true;
       }
+      if (shouldPreselectVacationPlanning) {
+        setVacationMode(true);
+        setOverrideMode(false);
+      }
       const targetIndex = getTargetIndexFromParams();
       if (targetIndex === null) return;
       scrollToMonthIndex(targetIndex, false);
@@ -280,7 +376,13 @@ export default function CalendarScreen() {
           scrollToMonthIndex(pendingTargetIndexRef.current, false);
         }
       });
-    }, [params.dateISO, params.returnMonthKey, params.suppressTaModal, params.returnToken])
+    }, [
+      params.dateISO,
+      params.returnMonthKey,
+      params.suppressTaModal,
+      params.returnToken,
+      shouldPreselectVacationPlanning,
+    ])
   );
 
   // Falls FlatList beim Fokus noch nicht bereit war: nach Loading erneut versuchen.
@@ -321,15 +423,15 @@ export default function CalendarScreen() {
     };
   }, [params.returnToken, params.dateISO]);
 
-  // Hardware-Back auf Kalender: zurück zur Startseite.
+  // Hardware-Back auf Kalender: zurück zum passenden Einstiegspunkt.
   useFocusEffect(
     useCallback(() => {
       const sub = BackHandler.addEventListener('hardwareBackPress', () => {
-        router.replace('/');
+        handleCalendarBack();
         return true;
       });
       return () => sub.remove();
-    }, [router])
+    }, [calendarReturnTarget, router])
   );
 
   // Daten laden
@@ -351,8 +453,12 @@ export default function CalendarScreen() {
           if (!active) return;
           setShiftMeta(buildShiftMetaWithOverrides(colorOverrides));
 
+          const spaceId = await getCurrentSpaceId();
+          if (!active) return;
+          setCurrentSpaceId(spaceId);
+
           // Stage 1: nur Shiftplan fuer schnellen First Paint
-          const shiftPlan = await getShiftPlan(p.id);
+          const shiftPlan = spaceId ? await getShiftPlanForSpace(spaceId, p.id) : null;
           if (!active) return;
 
           setPlan(shiftPlan);
@@ -366,12 +472,11 @@ export default function CalendarScreen() {
           setLoading(false);
 
           // Stage 2: weitere Kalenderdaten parallel nachladen
-          const [vDays, overrides, changes, spaceId, ur] = await Promise.all([
-            getVacationDays(p.id),
-            getShiftOverrides(p.id),
-            getDayChanges(p.id),
-            getCurrentSpaceId(),
-            getUserTimeAccountProfile(p.id),
+          const [vDays, overrides, changes, ur] = await Promise.all([
+            spaceId ? getVacationDaysForSpace(spaceId, p.id) : Promise.resolve([]),
+            spaceId ? getShiftOverridesForSpace(spaceId, p.id) : Promise.resolve({}),
+            spaceId ? getDayChangesForSpace(spaceId, p.id) : Promise.resolve({}),
+            spaceId ? getUserTimeAccountProfileForSpace(spaceId, p.id) : Promise.resolve(null),
           ]);
           if (!active) return;
 
@@ -380,6 +485,17 @@ export default function CalendarScreen() {
           setDayChanges(changes);
           setUserTaProfile(ur);
 
+          if (spaceId) {
+            const planningYears = [...new Set(months.map((month) => month.year).filter((year) => year > new Date().getFullYear()))];
+            const planningDaysByYear = await Promise.all(
+              planningYears.map((year) => getVacationPlanningDaysForProfile(spaceId, p.id, year))
+            );
+            if (!active) return;
+            setVacationPlanningDays(new Set(planningDaysByYear.flat()));
+          } else {
+            setVacationPlanningDays(new Set());
+          }
+
           if (!spaceId) {
             setGhostMap({});
             setSpaceRuleProfile(null);
@@ -387,7 +503,8 @@ export default function CalendarScreen() {
             if (shiftPlan && ur && hasSufficientData(shiftPlan, ur)) {
               const { fromISO, toISO } = defaultTimeRange();
               const version = computeSummaryVersion(shiftPlan, ur, null, fromISO, toISO);
-              const uiState = await getTimeAccountUiState(p.id);
+              const storageProfileId = spaceId ? buildSpaceProfileKey(spaceId, p.id) : p.id;
+              const uiState = await getTimeAccountUiState(storageProfileId);
               if (!active) return;
               const dismissedInCurrentSession =
                 !!uiState &&
@@ -424,7 +541,7 @@ export default function CalendarScreen() {
 
             const gMap: Record<string, GhostDayEntry[]> = {};
             for (const ghost of ghosts) {
-              const ghostPlan = allPlans[ghost.id];
+              const ghostPlan = getShiftPlanFromMapForSpace(allPlans, spaceId, ghost.id);
               if (!ghostPlan) continue;
               for (const entry of ghostPlan.entries) {
                 if (!gMap[entry.dateISO]) gMap[entry.dateISO] = [];
@@ -441,7 +558,8 @@ export default function CalendarScreen() {
             if (shiftPlan && ur && hasSufficientData(shiftPlan, ur)) {
               const { fromISO, toISO } = defaultTimeRange();
               const version = computeSummaryVersion(shiftPlan, ur, sr, fromISO, toISO);
-              const uiState = await getTimeAccountUiState(p.id);
+              const storageProfileId = buildSpaceProfileKey(spaceId, p.id);
+              const uiState = await getTimeAccountUiState(storageProfileId);
               if (!active) return;
               const dismissedInCurrentSession =
                 !!uiState &&
@@ -482,13 +600,75 @@ export default function CalendarScreen() {
 
   // Vacation counter for displayed year
   const currentYear = currentMonth?.year ?? new Date().getFullYear();
+  const realCurrentYear = new Date().getFullYear();
+  const isVacationPlanningYear = currentYear > realCurrentYear;
+  const vacationActionLabel = isVacationPlanningYear ? '🌴 Urlaubsvorplanung' : '🏖️ Urlaub';
+  const vacationCounterLabel = isVacationPlanningYear
+    ? `Urlaubsvorplanung ${currentYear}`
+    : `Urlaubstage ${currentYear}`;
+  const activeSignalCount = Number(showWDays) + Number(showHolidaySignals) + Number(showPreHolidaySignals);
+  const actionButtonSummary = [
+    vacationMode ? (isVacationPlanningYear ? 'Vorplanung aktiv' : 'Urlaub aktiv') : null,
+    overrideMode ? 'Ändern aktiv' : null,
+    showCalendarSignals ? `${activeSignalCount} Signale` : null,
+  ].filter(Boolean).join(' · ');
   const vacationCountForYear = useMemo(() => {
     let count = 0;
-    vacationDays.forEach((d) => {
+    const daySet = isVacationPlanningYear ? vacationPlanningDays : vacationDays;
+    daySet.forEach((d) => {
       if (d.startsWith(`${currentYear}-`)) count++;
     });
     return count;
-  }, [vacationDays, currentYear]);
+  }, [vacationDays, vacationPlanningDays, currentYear, isVacationPlanningYear]);
+  const planningBudgetDays =
+    isVacationPlanningYear && vacationPlanningBudget?.year === currentYear
+      ? vacationPlanningBudget.budgetDays
+      : 0;
+  const planningRemainingDays = planningBudgetDays - vacationCountForYear;
+  const planningBudgetPercent =
+    planningBudgetDays > 0
+      ? Math.min(100, Math.max(0, (vacationCountForYear / planningBudgetDays) * 100))
+      : 0;
+  const planningBudgetPulseStyle = {
+    transform: [
+      {
+        scale: planningBudgetPulse.interpolate({
+          inputRange: [0, 1],
+          outputRange: [1, 1.035],
+        }),
+      },
+    ],
+    shadowOpacity: planningBudgetPulse.interpolate({
+      inputRange: [0, 1],
+      outputRange: [0.08, 0.22],
+    }),
+  };
+
+  useEffect(() => {
+    let active = true;
+    if (!isVacationPlanningYear || !profile || !currentSpaceId) {
+      setVacationPlanningBudget(null);
+      return () => {
+        active = false;
+      };
+    }
+    getVacationPlanningBudgetSummary(currentSpaceId, profile.id, currentYear).then((summary) => {
+      if (active) setVacationPlanningBudget(summary);
+    });
+    return () => {
+      active = false;
+    };
+  }, [currentSpaceId, currentYear, isVacationPlanningYear, profile]);
+
+  useEffect(() => {
+    if (!vacationMode || !isVacationPlanningYear) return;
+    planningBudgetPulse.stopAnimation();
+    planningBudgetPulse.setValue(0);
+    Animated.sequence([
+      Animated.timing(planningBudgetPulse, { toValue: 1, duration: 160, useNativeDriver: false }),
+      Animated.timing(planningBudgetPulse, { toValue: 0, duration: 260, useNativeDriver: false }),
+    ]).start();
+  }, [isVacationPlanningYear, planningBudgetPulse, vacationCountForYear, vacationMode]);
 
   function scrollToToday() {
     flatListRef.current?.scrollToIndex({ index: TODAY_INDEX, animated: true });
@@ -542,20 +722,43 @@ export default function CalendarScreen() {
     // ────────────────────────────────────────────────────────────────────
 
     if (vacationMode && profile) {
-      // Urlaub-Modus: Urlaub setzen (hat Priorität)
-      const updated = await toggleVacationDay(profile.id, dateISO);
-      setVacationDays(new Set(updated));
-      const changes = await getDayChanges(profile.id);
-      setDayChanges(changes);
+      const targetYear = Number(dateISO.slice(0, 4));
+      const isPlanningDate = targetYear > new Date().getFullYear();
+
+      if (isPlanningDate) {
+        if (!currentSpaceId) return;
+        const updated = await toggleVacationPlanningDay({
+          spaceId: currentSpaceId,
+          profileId: profile.id,
+          dateISO,
+        });
+        setVacationPlanningDays((prev) => {
+          const next = new Set([...prev].filter((day) => !day.startsWith(`${targetYear}-`)));
+          updated.forEach((day) => next.add(day));
+          return next;
+        });
+      } else {
+        // Urlaub-Modus: Urlaub setzen (hat Priorität)
+        if (!currentSpaceId) return;
+        const updated = await toggleVacationDayForSpace(currentSpaceId, profile.id, dateISO);
+        setVacationDays(new Set(updated));
+        const changes = await getDayChangesForSpace(currentSpaceId, profile.id);
+        setDayChanges(changes);
+      }
     } else if (overrideMode && profile) {
       // Override-Modus: einmalige Schichtänderung
-      const updated = await toggleShiftOverride(profile.id, dateISO);
+      if (!currentSpaceId) return;
+      const sequence: ShiftType[] = ['F', 'S', 'N', 'T', 'KS', 'KN', 'R', 'X'];
+      const current = shiftOverrides[dateISO];
+      const idx = current ? sequence.indexOf(current) : -1;
+      const nextCode = !current ? sequence[0] : idx < 0 || idx === sequence.length - 1 ? null : sequence[idx + 1];
+      const updated = await setShiftOverrideForSpace(currentSpaceId, profile.id, dateISO, nextCode);
       setShiftOverrides(updated);
-      const changes = await getDayChanges(profile.id);
+      const changes = await getDayChangesForSpace(currentSpaceId, profile.id);
       setDayChanges(changes);
     } else {
       router.push({
-        pathname: '/(swap)/candidates',
+        pathname: '/(shift)/day-detail',
         params: {
           dateISO,
           returnTo: '/(shift)/calendar',
@@ -596,7 +799,12 @@ export default function CalendarScreen() {
               const dayGhosts = ghostMap[cell.dateISO];
               const hasGhost = dayGhosts && dayGhosts.length > 0;
               const isHoliday = !!holidayMap[cell.dateISO];
-              const isVacation = vacationDays.has(cell.dateISO);
+              const isWeekdayHoliday = isHoliday && weekdayIndexMondayFirst(cell.dateISO) <= 4;
+              const isPreHoliday = isPreHolidayDate(cell.dateISO, holidayMap);
+              const isPlanningCell = item.year > new Date().getFullYear();
+              const isVacation = isPlanningCell
+                ? vacationPlanningDays.has(cell.dateISO)
+                : vacationDays.has(cell.dateISO);
               const isSchoolHoliday = !!schoolHolidayMap?.[cell.dateISO];
               const overrideCode = shiftOverrides[cell.dateISO];
               const overrideMeta = overrideCode ? shiftMeta[overrideCode] : null;
@@ -620,17 +828,47 @@ export default function CalendarScreen() {
               }
 
               const currentMeta = currentCode ? shiftMeta[currentCode] : null;
+              const isWDay =
+                cell.inMonth &&
+                !!spaceRuleProfile?.codeRules.W?.enabled &&
+                isWeekdayHoliday &&
+                currentCode === 'R';
+              // Aktive Signale: Grundbedingung + jeweiliger Toggle.
+              // W "konsumiert" den Holiday-Slot nur, wenn W tatsächlich angezeigt wird.
+              const wDayActive = isWDay && showWDays;
+              const holidayActive =
+                isHoliday && showHolidaySignals && cell.inMonth && !isWDay;
+              const preHolidayActive =
+                isPreHoliday && showPreHolidaySignals && cell.inMonth && !isHoliday && !isWDay;
+              const wDayBg = '#F59E0B';
+              const holidayBg = '#DC2626';
+              const preHolidayBg = '#14B8A6';
+              let signalBg: string | null = null;
+              if (wDayActive) {
+                signalBg = wDayBg;
+              } else if (holidayActive) {
+                signalBg = holidayBg;
+              } else if (preHolidayActive) {
+                signalBg = preHolidayBg;
+              }
+              const signalFg = signalBg ? pickReadableTextColor(signalBg) : null;
 
               // Bestimme Hintergrund-Farbe basierend auf dem Aktuellen Code
               let cellBg: string | undefined;
               if (currentMeta && cell.inMonth) {
                 cellBg = currentMeta.bg;
               }
+              if (signalBg) {
+                cellBg = signalBg;
+              }
 
               // Text-Farbe
               let cellFg: string | undefined;
               if (currentMeta && cell.inMonth) {
                 cellFg = currentMeta.fg;
+              }
+              if (signalFg) {
+                cellFg = signalFg;
               }
 
               return (
@@ -672,15 +910,22 @@ export default function CalendarScreen() {
                       {/* Obere Zeile: Original (wenn abweichend) */}
                       {hasDayChange && originalMeta && originalCode !== currentCode && (
                         <View style={styles.originalLine}>
-                          <Text style={[styles.originalText, { color: originalMeta.fg }]}>
+                          <Text style={[styles.originalText, { color: signalFg ?? originalMeta.fg }]}>
                             {originalMeta.label}
                           </Text>
-                          <Text style={styles.arrowText}>→</Text>
+                          <Text style={[styles.arrowText, signalFg ? { color: signalFg } : null]}>→</Text>
                         </View>
                       )}
                       {/* Untere Zeile: Aktueller Code - dominant */}
-                      <View style={[styles.currentLine, { backgroundColor: currentMeta?.bg }]}>
-                        <Text style={[styles.currentText, { color: currentMeta?.fg }]}>
+                      <View
+                        style={[
+                          styles.currentLine,
+                          signalBg
+                            ? styles.currentLineTransparent
+                            : { backgroundColor: currentMeta?.bg },
+                        ]}
+                      >
+                        <Text style={[styles.currentText, { color: signalFg ?? currentMeta?.fg }]}>
                           {currentMeta?.label}
                         </Text>
                       </View>
@@ -690,21 +935,32 @@ export default function CalendarScreen() {
                     <View style={styles.twoLineContainer}>
                       {originalMeta && (
                         <View style={styles.originalLine}>
-                          <Text style={[styles.originalText, { color: originalMeta.fg }]}>
+                          <Text style={[styles.originalText, { color: signalFg ?? originalMeta.fg }]}>
                             {originalMeta.label}
                           </Text>
-                          <Text style={styles.arrowText}>→</Text>
+                          <Text style={[styles.arrowText, signalFg ? { color: signalFg } : null]}>→</Text>
                         </View>
                       )}
-                      <View style={[styles.currentLine, { backgroundColor: shiftMeta.U.bg }]}>
-                        <Text style={[styles.currentText, { color: shiftMeta.U.fg }]}>U</Text>
+                      <View
+                        style={[
+                          styles.currentLine,
+                          signalBg
+                            ? styles.currentLineTransparent
+                            : { backgroundColor: shiftMeta.U.bg },
+                        ]}
+                      >
+                        <Text style={[styles.currentText, { color: signalFg ?? shiftMeta.U.fg }]}>U</Text>
                       </View>
                     </View>
                   ) : null}
 
-                  {/* Feiertag-Indikator: unterer Farbrand */}
-                  {isHoliday && cell.inMonth && (
+                  {/* Feiertag-Indikator: nur wenn keine Vollflächen-Signalmarkierung greift */}
+                  {holidayActive && !signalBg && (
                     <View style={styles.holidayBottomBar} />
+                  )}
+
+                  {preHolidayActive && !signalBg && (
+                    <View style={styles.preHolidayTopBar} />
                   )}
 
                   {/* Override-Indikator */}
@@ -734,7 +990,7 @@ export default function CalendarScreen() {
         <GhostLegendForMonth year={item.year} month={item.month} ghostMap={ghostMap} />
       </View>
     );
-  }, [shiftMap, shiftMeta, ghostMap, today, router, holidayMap, schoolHolidayMap, vacationDays, vacationMode, profile, plan, shiftOverrides, overrideMode, dayChanges, blinkDateISO]);
+  }, [shiftMap, shiftMeta, ghostMap, today, router, holidayMap, schoolHolidayMap, vacationDays, vacationPlanningDays, vacationMode, profile, plan, shiftOverrides, overrideMode, dayChanges, blinkDateISO, spaceRuleProfile, showWDays, showHolidaySignals, showPreHolidaySignals]);
 
   // ── Loading ──────────────────────────────────────────────────────────────
 
@@ -771,48 +1027,92 @@ export default function CalendarScreen() {
         </View>
       ) : (
         <>
-          {/* ── Vacation Mode Toggle ───────────────────────────────── */}
-          <View style={styles.vacModeRow}>
+          {/* ── Calendar Actions Launcher ───────────────────────────── */}
+          <View style={styles.actionsRow}>
             <TouchableOpacity
-              style={[styles.vacModeBtn, vacationMode && styles.vacModeBtnActive]}
-              onPress={() => setVacationMode(!vacationMode)}
+              style={[styles.actionsLauncher, showActionsModal && styles.actionsLauncherActive]}
+              onPress={() => setShowActionsModal(true)}
             >
-              <Text style={[styles.vacModeBtnText, vacationMode && styles.vacModeBtnTextActive]}>
-                🏖️ Urlaub
+              <Text style={[styles.actionsLauncherTitle, showActionsModal && styles.actionsLauncherTitleActive]}>
+                ☰ Kalender-Aktionen
+              </Text>
+              <Text style={[styles.actionsLauncherSummary, showActionsModal && styles.actionsLauncherSummaryActive]}>
+                {actionButtonSummary || 'Planung, Signale und Konten'}
               </Text>
             </TouchableOpacity>
-
             <TouchableOpacity
-              style={[styles.vacModeBtn, overrideMode && styles.overrideModeBtnActive]}
-              onPress={() => setOverrideMode(!overrideMode)}
+              style={[
+                styles.todayLauncher,
+                currentIndex === TODAY_INDEX && styles.todayLauncherInactive,
+              ]}
+              activeOpacity={0.85}
+              onPress={scrollToToday}
             >
-              <Text style={[styles.vacModeBtnText, overrideMode && styles.overrideModeBtnTextActive]}>
-                🔄 Ändern
-              </Text>
-            </TouchableOpacity>
-
-            {vacationMode && (
-              <TouchableOpacity
-                style={styles.strategyBtn}
-                onPress={() => router.push('/(shift)/strategy')}
+              <Text
+                style={[
+                  styles.todayLauncherTitle,
+                  currentIndex === TODAY_INDEX && styles.todayLauncherTitleInactive,
+                ]}
               >
-                <Text style={styles.strategyBtnText}>💡 Strategie</Text>
-              </TouchableOpacity>
-            )}
+                Heute
+              </Text>
+              <Text
+                style={[
+                  styles.todayLauncherSummary,
+                  currentIndex === TODAY_INDEX && styles.todayLauncherSummaryInactive,
+                ]}
+              >
+                {currentIndex === TODAY_INDEX ? 'Aktuell' : 'Springen'}
+              </Text>
+            </TouchableOpacity>
           </View>
 
           {/* ── Vacation Counter ───────────────────────────────────── */}
           {(vacationMode || overrideMode) && (
-            <View style={styles.vacCounterRow}>
-              <Text style={styles.vacCounterText}>
-                {vacationMode && (
-                  <>Urlaubstage {currentYear}: <Text style={styles.vacCounterBold}>{vacationCountForYear}</Text></>
-                )}
-                {overrideMode && !vacationMode && (
-                  <>Einmalige Änderungen aktiv</>
-                )}
-              </Text>
-              <View style={styles.vacLegendRow}>
+            <View
+              style={[
+                styles.vacCounterRow,
+                vacationMode && isVacationPlanningYear && styles.vacCounterRowStacked,
+              ]}
+            >
+              {vacationMode && isVacationPlanningYear ? (
+                <Animated.View style={[styles.planningBudgetPill, planningBudgetPulseStyle]}>
+                  <View style={styles.planningBudgetTopRow}>
+                    <Text style={styles.planningBudgetTitle}>Urlaubsvorplanung aktiv</Text>
+                    <Text
+                      style={[
+                        styles.planningBudgetFree,
+                        planningBudgetDays > 0 && planningRemainingDays <= 0 && styles.planningBudgetWarning,
+                      ]}
+                    >
+                      {planningBudgetDays > 0 ? `${Math.max(0, planningRemainingDays)} Tage frei` : 'Guthaben offen'}
+                    </Text>
+                  </View>
+                  <View style={styles.planningBudgetTrack}>
+                    <View style={[styles.planningBudgetFill, { width: `${planningBudgetPercent}%` }]} />
+                  </View>
+                  <Text style={styles.planningBudgetMeta}>
+                    {planningBudgetDays > 0
+                      ? `${vacationCountForYear} / ${planningBudgetDays} Tage vorgeplant`
+                      : 'Freizeitkonto pflegen, damit YASA dein Guthaben live einordnet'}
+                  </Text>
+                </Animated.View>
+              ) : (
+                <Text style={styles.vacCounterText}>
+                  {vacationMode && (
+                    <>{vacationCounterLabel}: <Text style={styles.vacCounterBold}>{vacationCountForYear}</Text></>
+                  )}
+                  {overrideMode && !vacationMode && (
+                    <>Einmalige Änderungen aktiv</>
+                  )}
+                </Text>
+              )}
+              <View
+                style={[
+                  styles.vacLegendRow,
+                  vacationMode && isVacationPlanningYear && styles.vacLegendRowStacked,
+                ]}
+              >
                 <View style={[styles.legendDot, { backgroundColor: colors.error }]} />
                 <Text style={styles.legendLabel}>Feiertag</Text>
                 <View style={[styles.legendDot, { backgroundColor: shiftMeta.U.bg, borderWidth: 1, borderColor: shiftMeta.U.fg }]} />
@@ -829,29 +1129,6 @@ export default function CalendarScreen() {
             </View>
           )}
 
-          {/* ── Freizeitkonto-Button ────────────────────────────────── */}
-          {hasSufficientData(plan, userTaProfile) && (
-            <TouchableOpacity
-              style={styles.taBtn}
-              onPress={() => {
-                const { fromISO, toISO } = defaultTimeRange();
-                const summary = computeTimeAccountSummary({
-                  plan: plan!,
-                  userProfile: userTaProfile!,
-                  spaceProfile: spaceRuleProfile,
-                  holidayMap,
-                  vacationDaySet: vacationDays,
-                  fromISO,
-                  toISO,
-                });
-                setTaSummary(summary);
-                setShowTaModal(true);
-              }}
-            >
-              <Text style={styles.taBtnText}>📊 Freizeitkonto</Text>
-            </TouchableOpacity>
-          )}
-
           {/* ── Monats-Navigation ───────────────────────────────────── */}
           <View style={styles.monthNav}>
             <TouchableOpacity onPress={goToPrev} style={styles.navArrow} hitSlop={{ top: 8, bottom: 8, left: 12, right: 12 }}>
@@ -864,12 +1141,6 @@ export default function CalendarScreen() {
               <Text style={styles.navArrowText}>›</Text>
             </TouchableOpacity>
           </View>
-
-          {currentIndex !== TODAY_INDEX && (
-            <TouchableOpacity style={styles.todayBtn} onPress={scrollToToday}>
-              <Text style={styles.todayBtnText}>Heute</Text>
-            </TouchableOpacity>
-          )}
 
           {/* ── Swipeable Month FlatList ─────────────────────────────── */}
           <FlatList
@@ -888,7 +1159,7 @@ export default function CalendarScreen() {
             maxToRenderPerBatch={3}
             updateCellsBatchingPeriod={30}
             removeClippedSubviews={false}
-            extraData={`${vacationMode}-${vacationDays.size}-${overrideMode}-${Object.keys(shiftOverrides).length}-${Object.keys(dayChanges).length}`}
+            extraData={`${vacationMode}-${vacationDays.size}-${vacationPlanningDays.size}-${overrideMode}-${Object.keys(shiftOverrides).length}-${Object.keys(dayChanges).length}-${showWDays ? 1 : 0}${showHolidaySignals ? 1 : 0}${showPreHolidaySignals ? 1 : 0}`}
             style={styles.flatList}
             onScrollToIndexFailed={({ index }) => {
               // FlatList kann beim ersten Render den Zielindex noch nicht kennen.
@@ -910,13 +1181,166 @@ export default function CalendarScreen() {
           fullWidth
         />
         <Button
-          label="Zurück zum Start"
-          onPress={() => router.replace('/')}
+          label={calendarReturnLabel}
+          onPress={handleCalendarBack}
           variant="subtle"
           fullWidth
         />
       </BottomActionBar>
       </ScrollView>
+
+      {/* ── Kalender-Aktionen Modal ─────────────────────────────────── */}
+      <Modal
+        visible={showActionsModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowActionsModal(false)}
+      >
+        <View style={styles.actionsModalBackdrop}>
+          <View style={styles.actionsModalCard}>
+            <ScrollView
+              style={styles.actionsModalScroll}
+              contentContainerStyle={styles.actionsModalScrollContent}
+              showsVerticalScrollIndicator={false}
+            >
+              <Text style={styles.actionsModalTitle}>Kalender-Aktionen</Text>
+              <Text style={styles.actionsModalSubtitle}>
+                Alle Werkzeuge für Planung, Signale und Konten an einem Ort.
+              </Text>
+
+              <View style={styles.actionsSection}>
+                <Text style={styles.actionsSectionTitle}>Planung</Text>
+
+                <TouchableOpacity
+                  style={[styles.actionsListBtn, vacationMode && styles.actionsListBtnActive]}
+                  onPress={() => {
+                    setVacationMode((prev) => !prev);
+                    setShowActionsModal(false);
+                  }}
+                >
+                  <Text style={[styles.actionsListBtnText, vacationMode && styles.actionsListBtnTextActive]}>
+                    {vacationActionLabel}
+                  </Text>
+                  <Text style={styles.actionsListBtnMeta}>
+                    {isVacationPlanningYear ? 'Team-Abstimmung für das nächste Jahr vorbereiten' : 'Urlaubstage im laufenden Jahr markieren'}
+                  </Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.actionsListBtn, overrideMode && styles.overrideModeBtnActive]}
+                  onPress={() => {
+                    setOverrideMode((prev) => !prev);
+                    setShowActionsModal(false);
+                  }}
+                >
+                  <Text style={[styles.actionsListBtnText, overrideMode && styles.overrideModeBtnTextActive]}>
+                    🔄 Ändern
+                  </Text>
+                  <Text style={styles.actionsListBtnMeta}>
+                    Einzelne Dienste direkt im Kalender anpassen
+                  </Text>
+                </TouchableOpacity>
+
+                {vacationMode && (
+                  <TouchableOpacity
+                    style={styles.actionsListBtn}
+                    onPress={() => {
+                      setShowActionsModal(false);
+                      router.push('/(shift)/strategy');
+                    }}
+                  >
+                    <Text style={[styles.actionsListBtnText, { color: colors.warning }]}>💡 Strategie</Text>
+                    <Text style={styles.actionsListBtnMeta}>
+                      Brückentage und Urlaubslösungen berechnen
+                    </Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+
+              <View style={styles.actionsSection}>
+                <Text style={styles.actionsSectionTitle}>Signale</Text>
+
+                <TouchableOpacity
+                  style={[styles.actionsListBtn, showCalendarSignals && styles.signalBtnActive]}
+                  onPress={() => setShowCalendarSignals((prev) => !prev)}
+                >
+                  <Text style={[styles.actionsListBtnText, showCalendarSignals && styles.signalBtnTextActive]}>
+                    ✨ Kalender-Signale
+                  </Text>
+                  <Text style={styles.actionsListBtnMeta}>
+                    Signale einblenden und Themenfilter öffnen
+                  </Text>
+                </TouchableOpacity>
+
+                {showCalendarSignals && (
+                  <View style={styles.signalPanelModal}>
+                    <TouchableOpacity
+                      style={[styles.signalPill, showWDays && styles.signalPillActive]}
+                      onPress={() => setShowWDays((prev) => !prev)}
+                    >
+                      <Text style={[styles.signalPillText, showWDays && styles.signalPillTextActive]}>
+                        W-Tage
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.signalPill, showHolidaySignals && styles.signalPillActive]}
+                      onPress={() => setShowHolidaySignals((prev) => !prev)}
+                    >
+                      <Text style={[styles.signalPillText, showHolidaySignals && styles.signalPillTextActive]}>
+                        Feiertage
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.signalPill, showPreHolidaySignals && styles.signalPillActive]}
+                      onPress={() => setShowPreHolidaySignals((prev) => !prev)}
+                    >
+                      <Text style={[styles.signalPillText, showPreHolidaySignals && styles.signalPillTextActive]}>
+                        Vorfesttage
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+
+              {hasSufficientData(plan, userTaProfile) && (
+                <View style={styles.actionsSection}>
+                  <Text style={styles.actionsSectionTitle}>Konten</Text>
+                  <TouchableOpacity
+                    style={styles.actionsListBtn}
+                    onPress={() => {
+                      const { fromISO, toISO } = defaultTimeRange();
+                      const summary = computeTimeAccountSummary({
+                        plan: plan!,
+                        userProfile: userTaProfile!,
+                        spaceProfile: spaceRuleProfile,
+                        holidayMap,
+                        vacationDaySet: vacationDays,
+                        fromISO,
+                        toISO,
+                      });
+                      setTaSummary(summary);
+                      setShowActionsModal(false);
+                      setShowTaModal(true);
+                    }}
+                  >
+                    <Text style={[styles.actionsListBtnText, { color: '#0E7490' }]}>📊 Freizeitkonto</Text>
+                    <Text style={styles.actionsListBtnMeta}>
+                      Prognose und Kontenlage für den gewählten Zeitraum öffnen
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+
+              <TouchableOpacity
+                style={styles.actionsModalCloseBtn}
+                onPress={() => setShowActionsModal(false)}
+              >
+                <Text style={styles.actionsModalCloseBtnText}>Schließen</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </View>
+      </Modal>
 
       {/* ── Freizeitkonto-Modal ─────────────────────────────────────── */}
       <Modal
@@ -989,8 +1413,9 @@ export default function CalendarScreen() {
                 style={styles.taModalDismissBtn}
                 onPress={() => {
                   if (taSummary && profile) {
+                    const storageProfileId = currentSpaceId ? buildSpaceProfileKey(currentSpaceId, profile.id) : profile.id;
                     setTimeAccountUiState({
-                      profileId: profile.id,
+                      profileId: storageProfileId,
                       dismissedForVersion: taSummary.summaryVersion,
                       dismissedAt: new Date().toISOString(),
                     });
@@ -1090,6 +1515,76 @@ const styles = StyleSheet.create({
   vacModeRow: {
     flexDirection: 'row', paddingHorizontal: PAGE_PADDING, gap: 8, marginTop: 8, marginBottom: 2,
   },
+  actionsRow: {
+    paddingHorizontal: PAGE_PADDING,
+    marginTop: 8,
+    marginBottom: 4,
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    gap: 12,
+  },
+  actionsLauncher: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: 18,
+    backgroundColor: colors.primaryBackground,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    minHeight: 58,
+    justifyContent: 'center',
+  },
+  actionsLauncherActive: {
+    backgroundColor: colors.primary,
+  },
+  actionsLauncherTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  actionsLauncherTitleActive: {
+    color: colors.textInverse,
+  },
+  actionsLauncherSummary: {
+    marginTop: 3,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  actionsLauncherSummaryActive: {
+    color: 'rgba(255,255,255,0.88)',
+  },
+  todayLauncher: {
+    width: 92,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    borderRadius: 18,
+    backgroundColor: colors.background,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    minHeight: 58,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  todayLauncherInactive: {
+    borderColor: colors.border,
+    backgroundColor: colors.backgroundTertiary,
+  },
+  todayLauncherTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.primary,
+  },
+  todayLauncherTitleInactive: {
+    color: colors.textSecondary,
+  },
+  todayLauncherSummary: {
+    marginTop: 3,
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  todayLauncherSummaryInactive: {
+    color: colors.textTertiary,
+  },
   vacModeBtn: {
     borderWidth: 1, borderColor: colors.success, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 7, backgroundColor: colors.background,
   },
@@ -1107,16 +1602,209 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: colors.warning, borderRadius: 20, paddingHorizontal: 14, paddingVertical: 7, backgroundColor: '#FFFBEB',
   },
   strategyBtnText: { fontSize: 13, fontWeight: '600', color: colors.warning },
+  signalBtn: {
+    borderWidth: 1,
+    borderColor: '#7C3AED',
+    borderRadius: 20,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    backgroundColor: '#F5F3FF',
+  },
+  signalBtnActive: {
+    backgroundColor: '#7C3AED',
+    borderColor: '#7C3AED',
+  },
+  signalBtnText: { fontSize: 13, fontWeight: '600', color: '#6D28D9' },
+  signalBtnTextActive: { color: '#FFFFFF' },
+  signalPanel: {
+    paddingHorizontal: PAGE_PADDING,
+    paddingTop: 4,
+    paddingBottom: 8,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  signalPanelModal: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+  },
+  signalPill: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    backgroundColor: colors.backgroundTertiary,
+  },
+  signalPillActive: {
+    backgroundColor: colors.primaryBackground,
+    borderColor: colors.primary,
+  },
+  signalPillText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  signalPillTextActive: {
+    color: colors.primary,
+  },
+  actionsModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(17,24,39,0.45)',
+    justifyContent: 'center',
+    paddingHorizontal: PAGE_PADDING,
+  },
+  actionsModalCard: {
+    backgroundColor: colors.background,
+    borderRadius: 22,
+    padding: spacing.lg,
+    maxHeight: '82%',
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+  },
+  actionsModalScroll: {
+    flexGrow: 0,
+  },
+  actionsModalScrollContent: {
+    paddingBottom: 4,
+  },
+  actionsModalTitle: {
+    fontSize: typography.fontSize.xl,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.textPrimary,
+  },
+  actionsModalSubtitle: {
+    marginTop: 4,
+    marginBottom: 14,
+    fontSize: typography.fontSize.sm,
+    color: colors.textSecondary,
+    lineHeight: 20,
+  },
+  actionsSection: {
+    marginTop: 10,
+  },
+  actionsSectionTitle: {
+    marginBottom: 8,
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.bold,
+    color: colors.textSecondary,
+    textTransform: 'uppercase',
+  },
+  actionsListBtn: {
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 16,
+    backgroundColor: colors.backgroundSecondary,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginBottom: 8,
+  },
+  actionsListBtnActive: {
+    backgroundColor: colors.successBackground,
+    borderColor: colors.success,
+  },
+  actionsListBtnText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  actionsListBtnTextActive: {
+    color: colors.successDark,
+  },
+  actionsListBtnMeta: {
+    marginTop: 4,
+    fontSize: 12,
+    color: colors.textSecondary,
+    lineHeight: 18,
+  },
+  actionsModalCloseBtn: {
+    marginTop: 16,
+    backgroundColor: colors.primary,
+    borderRadius: 16,
+    paddingVertical: 13,
+    alignItems: 'center',
+  },
+  actionsModalCloseBtnText: {
+    color: colors.textInverse,
+    fontSize: 15,
+    fontWeight: '700',
+  },
 
   // Vacation Counter
   vacCounterRow: {
-    paddingHorizontal: PAGE_PADDING, paddingVertical: 6, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingHorizontal: PAGE_PADDING,
+    paddingVertical: 6,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: 10,
+  },
+  vacCounterRowStacked: {
+    flexDirection: 'column',
+    alignItems: 'stretch',
+    gap: 8,
   },
   vacCounterText: { fontSize: 13, color: colors.textSecondary },
   vacCounterBold: { fontWeight: '700', color: colors.success, fontSize: 15 },
   vacLegendRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  vacLegendRowStacked: {
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+  },
   legendDot: { width: 8, height: 8, borderRadius: 4 },
   legendLabel: { fontSize: 11, color: colors.textSecondary },
+  planningBudgetPill: {
+    width: '100%',
+    backgroundColor: colors.background,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    shadowColor: colors.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowRadius: 12,
+    elevation: 2,
+  },
+  planningBudgetTopRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginBottom: 6,
+  },
+  planningBudgetTitle: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textPrimary,
+  },
+  planningBudgetFree: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.success,
+  },
+  planningBudgetWarning: {
+    color: colors.warning,
+  },
+  planningBudgetTrack: {
+    height: 6,
+    backgroundColor: colors.borderLight,
+    borderRadius: 999,
+    overflow: 'hidden',
+    marginBottom: 5,
+  },
+  planningBudgetFill: {
+    height: '100%',
+    backgroundColor: colors.primary,
+    borderRadius: 999,
+  },
+  planningBudgetMeta: {
+    fontSize: 11,
+    color: colors.textSecondary,
+  },
 
   // Month Navigation
   monthNav: {
@@ -1127,9 +1815,6 @@ const styles = StyleSheet.create({
   navArrowText: { fontSize: 24, fontWeight: '600', color: colors.grayDark, lineHeight: 28 },
   monthHeaderTouchable: { flex: 1, alignItems: 'center' },
   monthHeaderText: { fontSize: 18, fontWeight: '700', color: colors.textPrimary },
-  todayBtn: { alignSelf: 'center', backgroundColor: colors.primary, borderRadius: 16, paddingHorizontal: 16, paddingVertical: 6, marginBottom: 4 },
-  todayBtnText: { color: colors.textInverse, fontSize: 13, fontWeight: '600' },
-
   flatList: { minHeight: CELL_SIZE * 6 + 260 },
   monthPage: { paddingHorizontal: PAGE_PADDING, paddingTop: 8, paddingBottom: 8 },
 
@@ -1192,6 +1877,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  currentLineTransparent: {
+    backgroundColor: 'transparent',
+    paddingHorizontal: 0,
+    paddingVertical: 0,
+  },
   currentText: {
     fontSize: 14,
     fontWeight: '800',
@@ -1207,6 +1897,16 @@ const styles = StyleSheet.create({
     backgroundColor: colors.error,
     borderBottomLeftRadius: 8,
     borderBottomRightRadius: 8,
+  },
+  preHolidayTopBar: {
+    position: 'absolute',
+    left: 2,
+    right: 2,
+    top: 2,
+    height: 4,
+    backgroundColor: '#14B8A6',
+    borderTopLeftRadius: 6,
+    borderTopRightRadius: 6,
   },
   ghostDot: { position: 'absolute', bottom: 3, right: 3, width: 6, height: 6, borderRadius: 3, backgroundColor: colors.purple },
   // Override Dot

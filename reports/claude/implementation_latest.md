@@ -1,148 +1,128 @@
-# Implementation Latest – P1 Zeitkonto Card
-**Date:** 2026-04-12
-**Status:** COMPLETE — `tsc` exit 0, `npm test` 210/210 PASS
+# Implementation Report: Rule Profile Member Sync Fix
+
+**Datum:** 2026-04-15
+**Status:** READY_FOR_READ_LATEST: YES
+**Branch:** master
+**Scope:** P0 – Member sieht "Kein Regelprofil" trotz vorhandenem Regelprofil
 
 ---
 
-## Scope
+## Root Cause (technisch)
 
-New **Zeitkonto** card in `app/(services)/timeclock.tsx`, strictly separating:
-- **Foresight (Plan)** — shift-plan projection for remaining month
-- **Ist (abgeleistet)** — earned from completed stamp intervals only
+### Primary Bug: Member-Push überschreibt `rule_profile_json` mit NULL
 
-No mixing of forecast and actual. P0 invariants preserved.
+**Datei:** `lib/backend/teamSync.ts:pushSpacesToBackend()` (Zeile 74-106 alt)
 
----
+**Mechanismus:**
+1. Host speichert Regelprofil -> `setSpaceRuleProfile()` -> Supabase `spaces.rule_profile_json` wird korrekt gesetzt
+2. Member öffnet Zeitkonto -> `syncTeamSpaces()` wird aufgerufen
+3. `pushSpacesToBackend()` schickt **alle** Spaces als Upsert, inklusive `rule_profile_json: null` (Member hat lokal kein Profil)
+4. Supabase `INSERT ON CONFLICT DO UPDATE` setzt **alle** bereitgestellten Spalten -> `rule_profile_json` wird auf `null` überschrieben
+5. Der anschließende `pullSpacesForProfile()` liest `null` zurück
+6. **Ergebnis:** Member zerstört die Host-Daten und liest dann null -> "Kein Regelprofil"
 
-## New Module: `lib/zeitkontoEngine.ts`
+### Secondary Bug: Stille Sync-Fehler -> irreführende UI
 
-Pure function `computeZeitkonto(input) → ZeitkontoData` with:
+**Datei:** `app/(services)/time-account.tsx` (Zeile 83-93 alt)
 
-| Section | Field | Source | Category |
-|---|---|---|---|
-| Foresight | `plannedHoursMonth` | Shift plan full month | **Plan** |
-| Foresight | `remainingPlannedHours` | Future plan entries | **Plan** |
-| Foresight | `remainingShiftDays` | Count of future entries | **Plan** |
-| Foresight | `projectedEndDelta` | Current delta (assumes future = planned) | **Plan** |
-| Foresight | `projectedRemainingHolidayCredits` | Future holidays × shift hours | **Plan** |
-| Foresight | `projectedRemainingPreHolidayCredits` | Future preholidays × shift hours | **Plan** |
-| Foresight | `projectedEndBalance` | Current + projected credits | **Plan** |
-| Ist | `workedHoursToDate` | Stamp intervals | **Actual** |
-| Ist | `deltaHoursToDate` | worked − planned (strict) | **Actual** |
-| Ist | `creditedHolidayHours` | Holiday stamp credits | **Actual** |
-| Ist | `creditedPreHolidayHours` | Preholiday stamp credits | **Actual** |
-| Ist | `creditedFlexHours` | Paid flex (separate signal) | **Actual** |
-| Ist | `creditedTariffHoursTotal` | Holiday + preholiday | **Actual** |
-| Ist | `balanceToDate` | delta + tariff credits (NOT flex) | **Actual** |
+- `syncTeamSpaces`-Fehler werden mit leerem `catch {}` verschluckt
+- Kein UI-Feedback bei nicht-erreichbarem Backend
+- User sieht "Kein Regelprofil" statt "Backend offline"
+
+### Tertiary Bug: Kein lokales Caching des gesyncten Regelprofils
+
+- Nach erfolgreichem Sync wird das via Space-Objekt erhaltene Regelprofil nie in die dedizierte `TIME_ACCOUNT_SPACE_RULES` Storage-Map persistiert
+- Bei späteren Offline-Szenarien kann das Profil verloren gehen
 
 ---
 
-## Card Location
+## Dateien + Diff-Zusammenfassung
 
-Between **Monatskonto** and **Letzte Stempelzeiten** in timeclock.tsx.
+### 1. `lib/backend/teamSync.ts` — KRITISCHER FIX
 
-| Element | File:Line | testID |
-|---|---|---|
-| Card container | `timeclock.tsx:871` | `zeitkonto-card` |
-| Foresight section | `timeclock.tsx:878-954` | `zk-planned-month`, `zk-remaining-planned`, `zk-remaining-days`, `zk-projected-end-delta`, `zk-projected-balance` |
-| Ist section | `timeclock.tsx:956-1027` | `zk-worked`, `zk-delta`, `zk-holiday`, `zk-preholiday`, `zk-flex`, `zk-tariff`, `zk-balance` |
-| Import + memo | `timeclock.tsx:50`, `:292-302` | — |
+**Vorher:** Ein einzelner `upsert()` mit `rule_profile_json: space.spaceRuleProfile ?? null` für alle Spaces -> Member überschreibt Host-Daten mit null.
 
----
+**Nachher:**
+- Haupt-Upsert **ohne** `rule_profile_json` (verhindert null-Overwrite)
+- Separater `update()` nur für Spaces mit non-null `spaceRuleProfile`
+- Member (die kein lokales Profil haben) senden nie `rule_profile_json` an Supabase
+- Backward-compat: Fehler bei nicht-existierender Spalte wird weiterhin abgefangen
+- [RULESYNC] Logging bei Pull- und Merge-Operationen
 
-## P0 Invariants
+### 2. `app/(services)/time-account.tsx` — UI + Logging
 
-- **delta = worked − planned (strict)** — Z8 test: `deltaHoursToDate = -2`, flex = 1.5, NOT mixed
-- **flex separate** — Z9 test: `balanceToDate = 0` when only flex exists (3.0), not included
-- **credits explicit** — Holiday/preholiday shown as separate rows in both sections
+- Neuer State `syncOffline` trackt ob Sync fehlgeschlagen ist
+- Bei Sync-Fehler: `[RULESYNC]` logError mit Fehlergrund
+- Bei Sync-Erfolg: `[RULESYNC]` logInfo mit pulled/pushed Counts
+- UI differenziert:
+  - Sync OK + Profil vorhanden -> Profil-Card anzeigen
+  - Sync fehlgeschlagen + kein lokales Profil -> gelber Banner "Backend offline – letzter lokaler Stand"
+  - Sync OK + kein Profil -> "Kein Regelprofil" (Owner muss es anlegen)
+- Nach erfolgreichem Sync: `persistSyncedRuleProfile()` cacht Profil für Offline
 
----
+### 3. `lib/storage.ts` — Caching + Logging
 
-## Tests: `lib/__tests__/zeitkontoEngine.test.ts` (10 PASS)
+- `getSpaceRuleProfile()`: [RULESYNC] Logging für Quelle (dedicated map vs. Space-Objekt fallback), Error-Logging statt silent catch
+- Neue Funktion `persistSyncedRuleProfile()`: Persistiert ein via TeamSync erhaltenes Regelprofil in die dedizierte Storage-Map für Offline-Resilienz
 
-Z1 Ist mirrors monthSummary | Z2 remainingPlannedHours | Z3 projectedEndDelta |
-Z4 projected holiday | Z5 projected preholiday | Z6 null safety |
-Z7 projectedEndBalance | Z8 delta strict | Z9 flex separate | Z10 QA override
+### 4. `lib/__tests__/ruleSyncMerge.test.ts` — NEU (5 Tests)
 
-**Full suite: 210/210 PASS** (37+27+25+10+4+27+32+12+36)
-
----
-
-## Files Changed
-
-| File | Type |
-|---|---|
-| `lib/zeitkontoEngine.ts` | NEW — pure module |
-| `lib/__tests__/zeitkontoEngine.test.ts` | NEW — 10 tests |
-| `app/(services)/timeclock.tsx` | MODIFIED — import, useMemo, card JSX, 2 styles |
-| `package.json` | MODIFIED — added test to script |
-
-No changes to storage, timeAccountEngine, timeclockCases, autoStamp, routing.
+| Test | Invariante |
+|------|-----------|
+| R1 | Member erhält Profil bei erfolgreichem Remote-Pull |
+| R2 | Backend offline -> lokales Profil bleibt erhalten |
+| R2b | Remote gibt null zurück -> lokales Profil nicht downgegraded |
+| R3 | Mehrere Spaces mit gleichem Namen -> korrekte ID-basierte Selektion |
+| R4 | Remote-Update überschreibt ältere lokale Version |
 
 ---
 
-Previous: `archive/implementation_2026-04-11_timeclock_p0_consistency_fix.md`
-Archive: `archive/implementation_2026-04-12_zeitkonto_card_p1.md`
+## Testresultate
 
-READY_FOR_READ_LATEST: YES
-
----
-
-## Update – 2026-04-14 (Run2 Device Verification)
-
-### Runtime/Install Reality (Android local)
-- Expo Go remains out of flow for this phase.
-- Active validation path is local Android release APK via ADB:
-  - `android\app\build\outputs\apk\release\app-release.apk`
-  - Device B required explicit `Install via USB` allowance.
-- Key runtime mismatch marker from old builds (`TIMECLOCK_BUILD_SIG`) is now **not visible** on Device B after successful reinstall.
-
-### Manual E2E Run2 (Host/Member)
-- Setup:
-  - Device A = Host (new profile + space created)
-  - Device B = Member (new profile + QR join)
-- Join checks:
-  - Host visible on Device B Shiftpals: **PASS**
-  - Avatar correct on Device B: **PASS**
-- Delete propagation checks:
-  - Member profile deleted on Device B
-  - Device A `Space-Mitglieder`: member shown as exited with red banner: **PASS**
-  - Device A `Meine Shiftpals`: deleted member no longer shown as active: **PASS**
-
-### Implementation status after Run2
-- Current sync lifecycle for join/delete is validated on physical dual-device run.
-- No additional code change applied in this checkpoint block; this is runtime verification hardening.
-
-### Next queued engineering tasks
-1. Optional hygiene: prune/compact oversized `docs/ops/session_archive` growth strategy.
-
-READY_FOR_READ_LATEST: YES
+```
+tsc --noEmit                          -> Exit 0 (clean)
+npm test (175 existing tests)         -> ALL PASS
+ruleSyncMerge.test.ts (5 new tests)   -> 5/5 PASS
+```
 
 ---
 
-## Update – 2026-04-14 (Task 1 + Task 2 done)
+## Manuelle Teststeps
 
-### Task 1: Stempeluhr consistency ("Unvollständig" after edits) — DONE
-- File: `lib/timeclockCases.ts`
-- Change: Added fallback pairing in `pairCaseEvents(...)`:
-  - If exactly one `check_in` and one `check_out` exist but no segment is formed due to ordering/legacy metadata, a direct pair attempt is performed.
-  - Overnight wrap remains respected (`+24h` when needed).
-- Effect: prevents false `Unvollständig` for valid edited pairs.
+### Device A (Host)
 
-### Task 1 test extension — DONE
-- File: `lib/__tests__/timeclockCases.test.ts`
-- Added regression test:
-  - `Fallback pairing: exactly one check_in + one check_out with wrong createdAt order still pairs (overnight)`
+1. Admin -> Space-Regelprofil öffnen
+2. Regelprofil ausfüllen und speichern
+3. Bestätigung "Gespeichert" abwarten
+4. In Supabase prüfen: `SELECT rule_profile_json FROM spaces WHERE id = '<spaceId>'` -> muss non-null sein
 
-### Task 2: Delta vs Flex wording/summaries — DONE
-- File: `app/(services)/timeclock.tsx`
-- Monatskonto labels clarified:
-  - `Delta bisher (Ist - Soll, ohne Gleitzeit)`
-  - `Gleitzeit-Credit (separat, nicht im Delta)`
-  - `Gesamtdelta inkl. Tarif (ohne Gleitzeit)`
-  - Added helper line: `Gleitzeit wird separat geführt und nicht in Delta/Saldo eingemischt.`
+### Device B (Member)
 
-### Verification
-- `npm test` → PASS (full suite green).
+5. Services -> Zeitkonto öffnen
+6. **Erwartung (online):** Space-Regelprofil-Card wird angezeigt mit korrekten Daten
+7. ADB Logs prüfen: `[RULESYNC] syncTeamSpaces OK`, `[RULESYNC] pulled space hasRuleProfile: true`
+8. Flugmodus aktivieren -> Zeitkonto erneut öffnen
+9. **Erwartung (offline):** Gelber Banner "Backend offline – letzter lokaler Stand wird angezeigt." + Profil-Card (aus Cache)
+10. Falls noch nie gesynct im Offline-Modus: Banner zeigt "Kein Regelprofil lokal vorhanden. Bitte erneut öffnen, wenn eine Verbindung besteht."
 
-READY_FOR_READ_LATEST: YES
+### Regression Check
+
+11. Device A: Regelprofil ändern (z.B. W-Regel togglen)
+12. Device B: Zeitkonto erneut öffnen -> Änderung muss sichtbar sein
+13. In Supabase prüfen: `rule_profile_json` darf nach Member-Sync NICHT null geworden sein
+
+---
+
+## Offene Risiken
+
+| # | Risiko | Bewertung |
+|---|--------|-----------|
+| 1 | Supabase-Spalte `rule_profile_json` könnte bei neuen Spaces ohne Backfill noch null sein | LOW – Backfill wurde bereits ausgeführt, neue Spaces werden beim ersten Speichern befüllt |
+| 2 | Race Condition: Host speichert gleichzeitig mit Member-Sync | MINIMAL – Member pusht jetzt nie `rule_profile_json` wenn null, und separater `update()` only wenn non-null |
+| 3 | `persistSyncedRuleProfile` schreibt bei jedem Screen-Focus | LOW – Idempotent, nur AsyncStorage write |
+
+---
+
+## Kein SQL-Fix nötig
+
+Die DB-Spalte `rule_profile_json` existiert bereits und der Backfill wurde ausgeführt. Das Problem war rein clientseitig (Member-Push überschreibt mit null).

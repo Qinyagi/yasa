@@ -2,6 +2,7 @@ import type { RegularShiftCode, TimeClockEvent, UserShiftPlan, UserTimeClockConf
 import type { SpaceRuleProfile } from '../types/timeAccount';
 import { getHolidayMap } from '../data/holidays';
 import type { TimeClockQaDateType } from './storage';
+import { computeWDaysForRange } from './wDayEngine';
 
 const REGULAR_SHIFT_CODES: ReadonlySet<RegularShiftCode> = new Set(['F', 'S', 'N', 'KS', 'KN', 'T']);
 
@@ -15,6 +16,7 @@ export interface MonthlyWorkProgress {
   deltaHoursToDate: number;
   creditedHolidayHoursToDate: number;
   creditedPreHolidayHoursToDate: number;
+  creditedWDaysToDate: number;
   creditedHoursToDate: number;
   creditedFlexHoursToDate: number;
   totalDeltaWithCreditsToDate: number;
@@ -216,6 +218,13 @@ export function computeMonthlyWorkProgress(
   let workedHoursToDate = 0;
   let creditedHolidayHoursToDate = 0;
   let creditedPreHolidayHoursToDate = 0;
+  const creditedWDaysToDate = computeWDaysForRange({
+    plan: input.plan,
+    fromISO,
+    toISO: todayISO < toISO ? todayISO : toISO,
+    qaDateOverrides: input.qaDateOverrides,
+    wEnabled: input.spaceProfile?.codeRules.W?.enabled ?? false,
+  }).totalWDays;
   let creditedFlexHoursToDate = 0;
 
   for (const segment of segments) {
@@ -255,6 +264,7 @@ export function computeMonthlyWorkProgress(
     deltaHoursToDate,
     creditedHolidayHoursToDate,
     creditedPreHolidayHoursToDate,
+    creditedWDaysToDate,
     creditedHoursToDate,
     creditedFlexHoursToDate,
     totalDeltaWithCreditsToDate,
@@ -265,9 +275,10 @@ export function computeMonthlyWorkProgress(
       `Ist bisher: ${fmtHours(workedHoursToDate)}`,
       `Delta bisher: ${fmtHours(deltaHoursToDate)}`,
       `Tarifgutschrift bisher: ${fmtHours(creditedHoursToDate)} (Feiertag ${fmtHours(creditedHolidayHoursToDate)} + Vorfest ${fmtHours(creditedPreHolidayHoursToDate)})`,
+      `W-Tage bisher: ${creditedWDaysToDate}`,
       `Feiertag: gearbeitete Minuten an gesetzlichen Feiertagen (laut Feiertagskalender oder QA-Override)`,
       `Vorfest: gearbeitete Minuten am Tag vor einem Feiertag (z. B. Nachtdienst 21:45–24:00 vor Feiertag)`,
-      `W-Tage: bereits abgeschlossene Schichten mit Kommen+Gehen; offene/unvollständige Schichten zählen noch nicht`,
+      `W-Tage: Wochen-Feiertag Mo-Fr mit R im persönlichen Dienstplan`,
       `Gleitzeit angerechnet (Regel): ${fmtHours(creditedFlexHoursToDate)}`,
       `Gesamtdelta inkl. Tarif: ${fmtHours(totalDeltaWithCreditsToDate)}`,
     ],

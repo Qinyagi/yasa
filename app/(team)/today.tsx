@@ -15,18 +15,22 @@ import {
   getSpaces,
   getCurrentSpaceId,
   getAllShiftPlans,
-  saveShiftPlan,
+  buildSpaceProfileKey,
+  getShiftPlanFromMapForSpace,
+  saveShiftPlanForSpace,
   setSpaces,
   todayISO,
   listGhosts,
-  markGhostPresent,
+  markGhostPresentForSpace,
   mergeRemoteGhosts,
+  getPreparedIdProfiles,
 } from '../../lib/storage';
-import { pullShiftPlansByProfileIds, pushShiftPlanToBackend } from '../../lib/backend/shiftSync';
+import { pullShiftPlansByStorageKeys, pushShiftPlanToBackendKey } from '../../lib/backend/shiftSync';
 import { pullGhostsForSpace } from '../../lib/backend/ghostSync';
 import { syncTeamSpaces } from '../../lib/backend/teamSync';
 import { useRealtimeMemberSync } from '../../lib/backend/realtimeMembers';
 import { diffDaysUTC, shiftCodeAtDate } from '../../lib/shiftEngine';
+import { buildPreparedShiftpalEntries } from '../../lib/preparedProfilesShiftpals';
 import { MultiavatarView } from '../../components/MultiavatarView';
 import { resolveAvatarSeed } from '../../lib/avatarSeed';
 import type { UserProfile, Space, ShiftType, MemberSnapshot } from '../../types';
@@ -38,6 +42,8 @@ interface ColleagueEntry {
   member: MemberSnapshot;
   code: ShiftType;
   isGhost?: boolean;
+  isPrepared?: boolean;
+  preparedProfileId?: string;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -96,7 +102,7 @@ export default function TodayScreen() {
     // Falls back to local data silently on any network error.
     let spaces = localSpaces;
     try {
-      const syncResult = await syncTeamSpaces(p.id, localSpaces);
+      const syncResult = await syncTeamSpaces(p.id, localSpaces, { allowCached: true });
       spaces = syncResult.spaces;
       await setSpaces(spaces);
     } catch {
@@ -142,14 +148,14 @@ export default function TodayScreen() {
 
     let resolvedPlans = allPlans;
     try {
-      const memberIds = activeSpace.memberProfiles.map((m) => m.id);
+      const memberIds = activeSpace.memberProfiles.map((m) => buildSpaceProfileKey(currentSpaceId, m.id));
       // Include ghost IDs so their shift plans (presence entries) are pulled too
-      const ghostIds = ghosts.map((g) => g.id);
-      const remotePlans = await pullShiftPlansByProfileIds([...memberIds, ...ghostIds]);
+      const ghostIds = ghosts.map((g) => buildSpaceProfileKey(currentSpaceId, g.id));
+      const remotePlans = await pullShiftPlansByStorageKeys([...memberIds, ...ghostIds]);
       if (Object.keys(remotePlans).length > 0) {
         resolvedPlans = { ...allPlans, ...remotePlans };
         await Promise.all(
-          Object.values(remotePlans).map((plan) => saveShiftPlan(plan))
+          Object.values(remotePlans).map((plan) => saveShiftPlanForSpace(currentSpaceId, plan))
         );
       }
     } catch {
@@ -159,7 +165,7 @@ export default function TodayScreen() {
     const today = todayISO();
 
     // Eigene heutige Schicht ermitteln
-    const myPlan = resolvedPlans[p.id];
+    const myPlan = getShiftPlanFromMapForSpace(resolvedPlans, currentSpaceId, p.id) ?? undefined;
     const myEntry = myPlan?.entries.find((e) => e.dateISO === today);
     const myCode = myEntry?.code ?? null;
     setMyShift(myCode);
@@ -187,7 +193,7 @@ export default function TodayScreen() {
     for (const member of activeSpace.memberProfiles) {
       if (member.id === p.id) continue;
 
-      const memberPlan = resolvedPlans[member.id];
+      const memberPlan = getShiftPlanFromMapForSpace(resolvedPlans, currentSpaceId, member.id) ?? undefined;
       if (!memberPlan) {
         withoutPlan++;
         continue;
@@ -205,13 +211,24 @@ export default function TodayScreen() {
       }
     }
 
-    setColleagues(result);
+    const preparedProfiles = await getPreparedIdProfiles(currentSpaceId);
+    const preparedEntries: ColleagueEntry[] = buildPreparedShiftpalEntries(
+      preparedProfiles,
+      today,
+      myCode,
+      activeSpace.memberProfiles.map((member) => member.id)
+    ).map((entry) => ({
+      ...entry,
+      isPrepared: true,
+    }));
+
+    setColleagues([...result, ...preparedEntries]);
     setNoPlansCount(withoutPlan);
 
     // Ghost entries — ghosts already loaded + synced above (ghost pre-load section)
     const ghostEntries: ColleagueEntry[] = [];
     for (const ghost of ghosts) {
-      const ghostPlan = resolvedPlans[ghost.id];
+      const ghostPlan = getShiftPlanFromMapForSpace(resolvedPlans, currentSpaceId, ghost.id) ?? undefined;
       if (!ghostPlan) continue;
       const ghostEntry = ghostPlan.entries.find((e) => e.dateISO === today);
       if (ghostEntry) {
@@ -280,15 +297,15 @@ export default function TodayScreen() {
     setSavingGhost(true);
     try {
       const today = todayISO();
-      await markGhostPresent(selectedGhost.id, today, selectedShiftCode);
+      await markGhostPresentForSpace(space.id, selectedGhost.id, today, selectedShiftCode);
 
       // Push ghost plan to backend so other devices see this presence on next sync.
       // Best-effort: focus-sync convergence is the safety net if push fails.
       try {
         const allPlans = await getAllShiftPlans();
-        const ghostPlan = allPlans[selectedGhost.id];
+        const ghostPlan = getShiftPlanFromMapForSpace(allPlans, space.id, selectedGhost.id);
         if (ghostPlan) {
-          await pushShiftPlanToBackend(ghostPlan);
+          await pushShiftPlanToBackendKey(buildSpaceProfileKey(space.id, ghostPlan.profileId), ghostPlan);
         }
       } catch {
         // best-effort — focus-sync convergence handles eventual consistency
@@ -445,15 +462,21 @@ export default function TodayScreen() {
               </Text>
             </View>
           ) : (
-            colleagues.map(({ member, code }) => {
+            colleagues.map(({ member, code, isPrepared, preparedProfileId }) => {
               const meta = SHIFT_META[code];
               return (
-                <View key={member.id} style={styles.colleagueRow}>
+                <View
+                  key={isPrepared ? `prepared:${preparedProfileId ?? member.id}` : member.id}
+                  style={[styles.colleagueRow, isPrepared && styles.preparedRow]}
+                >
                   <MultiavatarView
                     seed={resolveAvatarSeed(member.id, member.displayName, member.avatarUrl)}
                     size={40}
                   />
-                  <Text style={styles.colleagueName}>{member.displayName}</Text>
+                  <View style={styles.colleagueNameCol}>
+                    <Text style={styles.colleagueName}>{member.displayName}</Text>
+                    {isPrepared && <Text style={styles.preparedTag}>Vorbereitet</Text>}
+                  </View>
                   <View style={[styles.shiftBadge, { backgroundColor: meta.bg }]}>
                     <Text style={[styles.shiftCode, { color: meta.fg }]}>{meta.label}</Text>
                   </View>
@@ -752,6 +775,20 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm + 1,
     fontWeight: typography.fontWeight.semibold,
     color: colors.textPrimary,
+  },
+  colleagueNameCol: {
+    flex: 1,
+  },
+  preparedRow: {
+    backgroundColor: '#ECFDF5',
+    borderWidth: 1,
+    borderColor: '#A7F3D0',
+  },
+  preparedTag: {
+    fontSize: typography.fontSize.xs + -1,
+    color: '#047857',
+    fontWeight: typography.fontWeight.semibold,
+    marginTop: 2,
   },
   shiftBadge: {
     width: 34,

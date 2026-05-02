@@ -15,6 +15,8 @@ import { useRouter } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import type {
   RegularShiftCode,
+  ShiftType,
+  TimeClockEvent,
   TimeClockEventType,
   UserProfile,
   UserShiftPlan,
@@ -23,6 +25,7 @@ import type {
 } from '../../types';
 import {
   addTimeClockEvent,
+  buildSpaceProfileKey,
   clearTimeClockQaDateOverride,
   getCurrentSpaceId,
   deriveTimeClockStampState,
@@ -30,11 +33,14 @@ import {
   getProfile,
   getSpaceRuleProfile,
   getShiftForDate,
-  getShiftPlan,
+  getShiftForDateForSpace,
+  getShiftPlanForSpace,
   getTimeClockQaCalendar,
   getTimeClockUiState,
   getTimeClockConfigOrDefault,
   getTimeClockEvents,
+  getShiftOverridesForSpace,
+  getXCompensationBookings,
   formatDateISO,
   setTimeClockQaDateOverride,
   setTimeClockTestPrompt,
@@ -46,6 +52,7 @@ import {
 } from '../../lib/storage';
 import { getHolidayMap, type Holiday } from '../../data/holidays';
 import type { SpaceRuleProfile } from '../../types/timeAccount';
+import type { XCompensationBooking } from '../../types/timeAccount';
 import { computeMonthlyWorkProgress } from '../../lib/timeAccountEngine';
 import { autoStampMissedShifts } from '../../lib/autoStamp';
 import {
@@ -155,6 +162,24 @@ function dateMarkers(
   return markers;
 }
 
+function xCompensationTitle(booking?: XCompensationBooking): string {
+  if (booking?.source === 'U') return 'Urlaub';
+  if (booking?.source === 'W') return 'W-Tag';
+  return 'Frei genommen';
+}
+
+function xCompensationCode(booking?: XCompensationBooking): string {
+  if (booking?.source === 'U') return 'U';
+  if (booking?.source === 'W') return 'W';
+  return 'X';
+}
+
+function xCompensationMeta(booking?: XCompensationBooking): string {
+  if (booking?.source === 'U') return 'Urlaub (U): keine Stempel erforderlich';
+  if (booking?.source === 'W') return 'W-Tag: keine Stempel erforderlich';
+  return 'Frei genommen (X): Platzhalterzeiten werden ignoriert';
+}
+
 // ShiftCaseSummary, DaySummary, buildShiftCases, buildDaySummaries,
 // REGULAR_SHIFT_CODES and SHIFT_SORT_ORDER are imported from lib/timeclockCases.
 
@@ -181,6 +206,14 @@ export default function TimeClockServiceScreen() {
   const [qaExpanded, setQaExpanded] = useState(false);
   const [qaDateInput, setQaDateInput] = useState(todayISO());
   const [qaOverrides, setQaOverrides] = useState<Record<string, 'holiday' | 'preholiday'>>({});
+  const [shiftOverrides, setShiftOverrides] = useState<Record<string, ShiftType>>({});
+  const [xCompensations, setXCompensations] = useState<Record<string, XCompensationBooking>>({});
+
+  const getStorageProfileId = useCallback(async (): Promise<string | null> => {
+    if (!profile?.id) return null;
+    const spaceId = await getCurrentSpaceId();
+    return spaceId ? buildSpaceProfileKey(spaceId, profile.id) : profile.id;
+  }, [profile?.id]);
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -194,24 +227,29 @@ export default function TimeClockServiceScreen() {
       setLoading(false);
       return;
     }
-    // Auto-Platzhalter für vergessene Stempelzeiten befüllen (vor Event-Lesen, idempotent)
-    try { await autoStampMissedShifts(p.id); } catch { /* best-effort */ }
-    const cfg = await getTimeClockConfigOrDefault(p.id);
-    const plan = await getShiftPlan(p.id);
-    const eventList = await getTimeClockEvents(p.id);
-    const qaMap = await getTimeClockQaCalendar(p.id);
     const spaceId = await getCurrentSpaceId();
+    const storageProfileId = spaceId ? buildSpaceProfileKey(spaceId, p.id) : p.id;
+    // Auto-Platzhalter für vergessene Stempelzeiten befüllen (vor Event-Lesen, idempotent)
+    try { await autoStampMissedShifts(p.id, { spaceId }); } catch { /* best-effort */ }
+    const cfg = await getTimeClockConfigOrDefault(storageProfileId);
+    const plan = spaceId ? await getShiftPlanForSpace(spaceId, p.id) : null;
+    const eventList = await getTimeClockEvents(storageProfileId);
+    const qaMap = await getTimeClockQaCalendar(storageProfileId);
+    const overridesMap = spaceId ? await getShiftOverridesForSpace(spaceId, p.id) : {};
+    const xCompensationMap = await getXCompensationBookings(storageProfileId);
     const sr = spaceId ? await getSpaceRuleProfile(spaceId) : null;
-    const ui = await getTimeClockUiState(p.id);
+    const ui = await getTimeClockUiState(storageProfileId);
     const today = todayISO();
     const yesterday = plusDays(today, -1);
-    const todayShift = await getShiftForDate(p.id, today);
-    const yesterdayShift = await getShiftForDate(p.id, yesterday);
+    const todayShift = spaceId ? await getShiftForDateForSpace(spaceId, p.id, today) : await getShiftForDate(p.id, today);
+    const yesterdayShift = spaceId ? await getShiftForDateForSpace(spaceId, p.id, yesterday) : await getShiftForDate(p.id, yesterday);
     setConfig(cfg);
     setShiftPlan(plan);
     setSpaceProfile(sr);
     setEvents(eventList);
     setQaOverrides(qaMap);
+    setShiftOverrides(overridesMap);
+    setXCompensations(xCompensationMap);
     setSettingsExpanded(ui?.settingsExpanded ?? true);
 
     let selectedFromYesterdayOpen = false;
@@ -262,19 +300,90 @@ export default function TimeClockServiceScreen() {
     return () => subscription.remove();
   }, [loadData]);
 
-  const displayEvents = useMemo(() => events.slice(0, 30), [events]);
-  const shiftCases = useMemo(() => buildShiftCases(events, config), [events, config]);
+  const xOverrideDates = useMemo(() => {
+    return new Set(
+      Object.entries(shiftOverrides)
+        .filter(([, code]) => code === 'X')
+        .map(([dateISO]) => dateISO)
+    );
+  }, [shiftOverrides]);
+
+  const eventsForEvaluation = useMemo(() => {
+    return events.filter((e) => !(e.source === 'auto_placeholder' && xOverrideDates.has(e.dateISO)));
+  }, [events, xOverrideDates]);
+
+  const shiftCases = useMemo(() => buildShiftCases(eventsForEvaluation, config), [eventsForEvaluation, config]);
+  const xOnlyCaseDates = useMemo(() => {
+    const existingDates = new Set(shiftCases.map((entry) => entry.dateISO));
+    return Array.from(xOverrideDates)
+      .filter((dateISO) => !existingDates.has(dateISO))
+      .sort((a, b) => b.localeCompare(a));
+  }, [shiftCases, xOverrideDates]);
+  type ShiftListRow =
+    | { kind: 'case'; entry: (typeof shiftCases)[number] }
+    | { kind: 'x'; dateISO: string };
+  const shiftListRows = useMemo<ShiftListRow[]>(() => {
+    const rows: ShiftListRow[] = [
+      ...shiftCases.map((entry) => ({ kind: 'case' as const, entry })),
+      ...xOnlyCaseDates.map((dateISO) => ({ kind: 'x' as const, dateISO })),
+    ];
+    return rows.sort((a, b) => {
+      const aDate = a.kind === 'case' ? a.entry.dateISO : a.dateISO;
+      const bDate = b.kind === 'case' ? b.entry.dateISO : b.dateISO;
+      // Neueste Tage oben; bei gleichem Datum zuerst regulärer Case, dann X-only row.
+      if (aDate !== bDate) return bDate.localeCompare(aDate);
+      if (a.kind === b.kind) return 0;
+      return a.kind === 'case' ? -1 : 1;
+    });
+  }, [shiftCases, xOnlyCaseDates]);
+
+  type StampListRow =
+    | { kind: 'event'; event: TimeClockEvent }
+    | { kind: 'x'; dateISO: string };
+  const displayRows = useMemo<StampListRow[]>(() => {
+    const nonXEventRows: StampListRow[] = events
+      .filter((e) => !xOverrideDates.has(e.dateISO))
+      .map((event) => ({ kind: 'event', event }));
+    const xRows: StampListRow[] = Array.from(xOverrideDates).map((dateISO) => ({
+      kind: 'x',
+      dateISO,
+    }));
+    const sortKey = (row: StampListRow): number => {
+      if (row.kind === 'event') return new Date(row.event.timestampISO).getTime();
+      return new Date(`${row.dateISO}T12:00:00`).getTime();
+    };
+    return [...xRows, ...nonXEventRows]
+      .sort((a, b) => sortKey(b) - sortKey(a))
+      .slice(0, 30);
+  }, [events, xOverrideDates]);
   const daySummaries = useMemo(() => buildDaySummaries(shiftCases), [shiftCases]);
+  const effectivePlan = useMemo(() => {
+    if (!shiftPlan) return null;
+    const byDate: Record<string, ShiftType> = {};
+    for (const entry of shiftPlan.entries) {
+      byDate[entry.dateISO] = entry.code;
+    }
+    for (const [dateISO, code] of Object.entries(shiftOverrides)) {
+      byDate[dateISO] = code;
+    }
+    const mergedEntries = Object.entries(byDate)
+      .map(([dateISO, code]) => ({ dateISO, code }))
+      .sort((a, b) => a.dateISO.localeCompare(b.dateISO));
+    return {
+      ...shiftPlan,
+      entries: mergedEntries,
+    };
+  }, [shiftPlan, shiftOverrides]);
   const monthSummary = useMemo(
     () =>
       computeMonthlyWorkProgress({
-        plan: shiftPlan,
+        plan: effectivePlan,
         config,
-        events,
+        events: eventsForEvaluation,
         spaceProfile,
         qaDateOverrides: qaOverrides,
       }),
-    [shiftPlan, config, events, spaceProfile, qaOverrides]
+    [effectivePlan, config, eventsForEvaluation, spaceProfile, qaOverrides]
   );
   const holidayLookup = useMemo(() => {
     const seedDates = [
@@ -302,9 +411,18 @@ export default function TimeClockServiceScreen() {
   }, [events, selectedShiftCode]);
 
   const selectedShiftEvents = useMemo(
-    () => events.filter((e) => e.dateISO === selectedShiftDateISO && e.shiftCode === selectedShiftCode),
-    [events, selectedShiftCode, selectedShiftDateISO]
+    () =>
+      eventsForEvaluation.filter(
+        (e) => e.dateISO === selectedShiftDateISO && e.shiftCode === selectedShiftCode
+      ),
+    [eventsForEvaluation, selectedShiftCode, selectedShiftDateISO]
   );
+
+  const selectedDateIsX = useMemo(
+    () => xOverrideDates.has(selectedShiftDateISO),
+    [xOverrideDates, selectedShiftDateISO]
+  );
+  const selectedDateXCompensation = xCompensations[selectedShiftDateISO];
 
   const selectedShiftState = useMemo(
     () => deriveTimeClockStampState(selectedShiftEvents),
@@ -357,17 +475,21 @@ export default function TimeClockServiceScreen() {
 
   async function handleSaveConfig() {
     if (!config) return;
+    const storageProfileId = await getStorageProfileId();
+    if (!storageProfileId) return;
     setSaving(true);
-    await setTimeClockConfig(config);
+    await setTimeClockConfig({ ...config, profileId: storageProfileId });
     setSaving(false);
     Alert.alert('Gespeichert', 'Deine Stempeluhr-Einstellungen wurden gespeichert.');
   }
 
   async function handleToggleSettingsExpanded() {
     if (!profile) return;
+    const storageProfileId = await getStorageProfileId();
+    if (!storageProfileId) return;
     const next = !settingsExpanded;
     setSettingsExpanded(next);
-    await setTimeClockUiState(profile.id, {
+    await setTimeClockUiState(storageProfileId, {
       settingsExpanded: next,
       updatedAt: new Date().toISOString(),
     });
@@ -375,6 +497,14 @@ export default function TimeClockServiceScreen() {
 
   async function handleQuickStamp() {
     if (!profile) return;
+    const storageProfileId = await getStorageProfileId();
+    if (!storageProfileId) return;
+    if (selectedDateIsX) {
+      const title = xCompensationTitle(selectedDateXCompensation);
+      const code = xCompensationCode(selectedDateXCompensation);
+      Alert.alert(title, `Für ${selectedShiftDateISO} ist ${code} (${title}) gesetzt. Keine Stempelung erforderlich.`);
+      return;
+    }
     if (selectedShiftState.phase === 'completed') {
       Alert.alert(
         'Schicht bereits abgeschlossen',
@@ -404,7 +534,7 @@ export default function TimeClockServiceScreen() {
     setStamping(true);
     const now = new Date();
     const nowISO = now.toISOString();
-    await addTimeClockEvent(profile.id, {
+    await addTimeClockEvent(storageProfileId, {
       dateISO: selectedShiftDateISO,
       weekdayLabel: weekdayLabel(selectedShiftDateISO),
       shiftCode: selectedShiftCode,
@@ -412,7 +542,7 @@ export default function TimeClockServiceScreen() {
       timestampISO: nowISO,
       source: 'manual_service',
     });
-    const refreshed = await getTimeClockEvents(profile.id);
+    const refreshed = await getTimeClockEvents(storageProfileId);
     setEvents(refreshed);
     setStamping(false);
     Alert.alert('Erfasst', `${selectedEventType === 'check_in' ? 'Kommen' : 'Gehen'} um ${timePart(nowISO)} gespeichert.`);
@@ -420,7 +550,9 @@ export default function TimeClockServiceScreen() {
 
   async function handleTriggerPopupTest() {
     if (!profile) return;
-    await setTimeClockTestPrompt(profile.id, {
+    const storageProfileId = await getStorageProfileId();
+    if (!storageProfileId) return;
+    await setTimeClockTestPrompt(storageProfileId, {
       shiftDateISO: selectedShiftDateISO,
       shiftCode: selectedShiftCode,
       eventType: selectedEventType,
@@ -445,13 +577,15 @@ export default function TimeClockServiceScreen() {
 
   async function handleSaveEditedEvent() {
     if (!profile || !editingEventId) return;
+    const storageProfileId = await getStorageProfileId();
+    if (!storageProfileId) return;
     const trimmedDate = editDateISO.trim();
     if (!isValidDateISO(trimmedDate)) {
       Alert.alert('Ungültiges Datum', 'Bitte Datum im Format YYYY-MM-DD eingeben.');
       return;
     }
     const normalizedTime = normalizeToHHMM(editTimeInput, '00:00');
-    const result = await updateTimeClockEvent(profile.id, editingEventId, {
+    const result = await updateTimeClockEvent(storageProfileId, editingEventId, {
       dateISO: trimmedDate,
       weekdayLabel: weekdayLabel(trimmedDate),
       shiftCode: editShiftCode,
@@ -463,7 +597,7 @@ export default function TimeClockServiceScreen() {
       Alert.alert('Fehler', result.reason);
       return;
     }
-    const refreshed = await getTimeClockEvents(profile.id);
+    const refreshed = await getTimeClockEvents(storageProfileId);
     setEvents(refreshed);
     setEditingEventId(null);
     Alert.alert('Gespeichert', 'Stempelzeit wurde aktualisiert.');
@@ -471,12 +605,14 @@ export default function TimeClockServiceScreen() {
 
   async function handleDeleteEditedEvent() {
     if (!profile || !editingEventId) return;
-    const result = await deleteTimeClockEvent(profile.id, editingEventId);
+    const storageProfileId = await getStorageProfileId();
+    if (!storageProfileId) return;
+    const result = await deleteTimeClockEvent(storageProfileId, editingEventId);
     if (!result.ok) {
       Alert.alert('Fehler', result.reason);
       return;
     }
-    const refreshed = await getTimeClockEvents(profile.id);
+    const refreshed = await getTimeClockEvents(storageProfileId);
     setEvents(refreshed);
     setEditingEventId(null);
     Alert.alert('Gelöscht', 'Stempelzeit wurde gelöscht.');
@@ -484,21 +620,25 @@ export default function TimeClockServiceScreen() {
 
   async function handleSetQaOverride(type: 'holiday' | 'preholiday') {
     if (!profile) return;
+    const storageProfileId = await getStorageProfileId();
+    if (!storageProfileId) return;
     const dateISO = qaDateInput.trim();
     if (!isValidDateISO(dateISO)) {
       Alert.alert('Ungültiges Datum', 'Bitte Datum im Format YYYY-MM-DD eingeben.');
       return;
     }
-    await setTimeClockQaDateOverride(profile.id, dateISO, type);
-    const next = await getTimeClockQaCalendar(profile.id);
+    await setTimeClockQaDateOverride(storageProfileId, dateISO, type);
+    const next = await getTimeClockQaCalendar(storageProfileId);
     setQaOverrides(next);
     Alert.alert('QA-Override gesetzt', `${dateISO} wurde als ${type === 'holiday' ? 'Feiertag' : 'Vorfest'} markiert.`);
   }
 
   async function handleClearQaOverride(dateISO: string) {
     if (!profile) return;
-    await clearTimeClockQaDateOverride(profile.id, dateISO);
-    const next = await getTimeClockQaCalendar(profile.id);
+    const storageProfileId = await getStorageProfileId();
+    if (!storageProfileId) return;
+    await clearTimeClockQaDateOverride(storageProfileId, dateISO);
+    const next = await getTimeClockQaCalendar(storageProfileId);
     setQaOverrides(next);
   }
 
@@ -557,12 +697,19 @@ export default function TimeClockServiceScreen() {
             </TouchableOpacity>
           ))}
         </View>
-        <TouchableOpacity testID="timeclock-stamp-now" style={styles.stampBtn} onPress={handleQuickStamp} disabled={stamping}>
+        <TouchableOpacity
+          testID="timeclock-stamp-now"
+          style={[styles.stampBtn, selectedDateIsX ? styles.stampBtnDisabled : null]}
+          onPress={handleQuickStamp}
+          disabled={stamping || selectedDateIsX}
+        >
           <Text style={styles.stampBtnText}>{stamping ? 'Speichert...' : 'Jetzt stempeln'}</Text>
         </TouchableOpacity>
         <Text style={styles.helperText}>
           Status Diensttag {selectedShiftDateISO} ({selectedShiftCode}):{' '}
-          {selectedShiftState.phase === 'awaiting_check_in'
+          {selectedDateIsX
+            ? `${xCompensationTitle(selectedDateXCompensation)} (${xCompensationCode(selectedDateXCompensation)}) - keine Stempel erforderlich`
+            : selectedShiftState.phase === 'awaiting_check_in'
             ? 'Bereit für Kommen'
             : selectedShiftState.phase === 'awaiting_check_out'
               ? `Offener Dienst seit ${selectedShiftState.openCheckInTimestampISO ? timePart(selectedShiftState.openCheckInTimestampISO) : '--:--'}`
@@ -570,12 +717,17 @@ export default function TimeClockServiceScreen() {
                 ? 'Schicht abgeschlossen'
                 : 'Bitte Stempel manuell korrigieren'}
         </Text>
-        {selectedShiftState.allowedEventType !== null && selectedEventType !== selectedShiftState.allowedEventType ? (
+        {!selectedDateIsX && selectedShiftState.allowedEventType !== null && selectedEventType !== selectedShiftState.allowedEventType ? (
           <Text style={styles.inlineWarningText}>
             Hinweis: Als nächstes ist "{selectedShiftState.allowedEventType === 'check_in' ? 'Kommen' : 'Gehen'}" erlaubt.
           </Text>
         ) : null}
-        <TouchableOpacity testID="timeclock-test-popup-now" style={styles.testPopupBtn} onPress={handleTriggerPopupTest}>
+        <TouchableOpacity
+          testID="timeclock-test-popup-now"
+          style={[styles.testPopupBtn, selectedDateIsX ? styles.testPopupBtnDisabled : null]}
+          onPress={handleTriggerPopupTest}
+          disabled={selectedDateIsX}
+        >
           <Text style={styles.testPopupBtnText}>Popup jetzt testen</Text>
         </TouchableOpacity>
       </View>
@@ -697,10 +849,15 @@ export default function TimeClockServiceScreen() {
           Kommen und Gehen werden als ein Schichtfall zusammengeführt. Tageswerte basieren auf vorhandenen Paaren.
         </Text>
 
-        {shiftCases.length === 0 ? (
+        {shiftListRows.length === 0 ? (
           <Text style={styles.emptyText}>Noch keine Schichtfälle vorhanden.</Text>
         ) : (
-          shiftCases.map((entry) => (
+          <>
+          {shiftListRows.map((row) => row.kind === 'case' ? (
+            (() => {
+              const entry = row.entry;
+              const booking = xCompensations[entry.dateISO];
+              return (
             <View key={entry.key} style={[styles.eventRow, dateMarkers(entry.dateISO, holidayLookup).length > 0 ? styles.highlightRow : null]}>
               <View style={styles.eventMain}>
                 <Text style={styles.eventType}>
@@ -719,14 +876,19 @@ export default function TimeClockServiceScreen() {
                   </View>
                 )}
                 <Text style={styles.eventMeta}>
-                  Kommen: {entry.checkIn ? timePart(entry.checkIn) : 'offen'} · Gehen:{' '}
-                  {entry.checkOut ? timePart(entry.checkOut) : 'offen'}
+                  {xOverrideDates.has(entry.dateISO)
+                    ? xCompensationMeta(booking)
+                    : `Kommen: ${entry.checkIn ? timePart(entry.checkIn) : 'offen'} · Gehen: ${entry.checkOut ? timePart(entry.checkOut) : 'offen'}`}
                 </Text>
                 <Text style={styles.eventMeta}>Abschnitte: {entry.segmentCount}</Text>
-                <Text style={styles.eventMeta}>Soll: {formatHoursDecimal(entry.plannedHours)}</Text>
+                <Text style={styles.eventMeta}>
+                  {xOverrideDates.has(entry.dateISO) ? `Soll: 0,00 h (${xCompensationTitle(booking)})` : `Soll: ${formatHoursDecimal(entry.plannedHours)}`}
+                </Text>
               </View>
               <View style={styles.eventActions}>
-                {entry.workedHours !== null ? (
+                {xOverrideDates.has(entry.dateISO) ? (
+                  <Text style={styles.emptyText}>{xCompensationTitle(booking)}</Text>
+                ) : entry.workedHours !== null ? (
                   <>
                     <Text style={styles.summaryMainValue}>{formatHoursDecimal(entry.workedHours)}</Text>
                     <Text
@@ -755,7 +917,42 @@ export default function TimeClockServiceScreen() {
                 )}
               </View>
             </View>
-          ))
+          );
+            })()
+          ) : (
+            (() => {
+              const dateISO = row.dateISO;
+              const booking = xCompensations[dateISO];
+              return (
+            <View key={`x-only-${dateISO}`} style={[styles.eventRow, dateMarkers(dateISO, holidayLookup).length > 0 ? styles.highlightRow : null]}>
+              <View style={styles.eventMain}>
+                <Text style={styles.eventType}>
+                  {dateISO} · {weekdayLabel(dateISO)} · {xCompensationCode(booking)}
+                </Text>
+                {dateMarkers(dateISO, holidayLookup).length > 0 && (
+                  <View style={styles.markerRow}>
+                    {dateMarkers(dateISO, holidayLookup).map((marker) => (
+                      <View
+                        key={`shift-marker-x-only-${dateISO}-${marker.kind}-${marker.label}`}
+                        style={[styles.markerChip, marker.kind === 'holiday' ? styles.holidayMarkerChip : styles.preholidayMarkerChip]}
+                      >
+                        <Text style={styles.markerChipText}>{marker.label}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+                <Text style={styles.eventMeta}>{xCompensationMeta(booking)}</Text>
+                <Text style={styles.eventMeta}>Abschnitte: 0</Text>
+                <Text style={styles.eventMeta}>Soll: 0,00 h ({xCompensationTitle(booking)})</Text>
+              </View>
+              <View style={styles.eventActions}>
+                <Text style={styles.emptyText}>{xCompensationTitle(booking)}</Text>
+              </View>
+            </View>
+          );
+            })()
+          ))}
+          </>
         )}
       </View>
 
@@ -859,21 +1056,63 @@ export default function TimeClockServiceScreen() {
 
       <View style={styles.card}>
         <Text style={styles.cardTitle}>Letzte Stempelzeiten</Text>
-        {displayEvents.length === 0 ? (
+        {displayRows.length === 0 ? (
           <Text style={styles.emptyText}>Noch keine Stempelzeiten vorhanden.</Text>
         ) : (
-          displayEvents.map((e) => (
+          displayRows.map((row) => {
+            if (row.kind === 'x') {
+              const dateISO = row.dateISO;
+              const booking = xCompensations[dateISO];
+              return (
+                <View key={`event-x-only-${dateISO}`} style={[styles.eventRow, dateMarkers(dateISO, holidayLookup).length > 0 ? styles.highlightRow : null]}>
+                  <View style={styles.eventMain}>
+                    <View style={styles.eventTypeRow}>
+                      <Text style={styles.eventType}>{xCompensationTitle(booking)}</Text>
+                    </View>
+                    <Text style={styles.eventMeta}>
+                      {dateISO} · {weekdayLabel(dateISO)} · {xCompensationCode(booking)}
+                    </Text>
+                    <Text style={styles.eventMeta}>Hinweis: Tag ist als {xCompensationCode(booking)} ({xCompensationTitle(booking)}) gesetzt.</Text>
+                    {dateMarkers(dateISO, holidayLookup).length > 0 && (
+                      <View style={styles.markerRow}>
+                        {dateMarkers(dateISO, holidayLookup).map((marker) => (
+                          <View
+                            key={`event-marker-x-only-${dateISO}-${marker.kind}-${marker.label}`}
+                            style={[styles.markerChip, marker.kind === 'holiday' ? styles.holidayMarkerChip : styles.preholidayMarkerChip]}
+                          >
+                            <Text style={styles.markerChipText}>{marker.label}</Text>
+                          </View>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                  <View style={styles.eventActions}>
+                    <Text style={styles.eventTime}>—</Text>
+                  </View>
+                </View>
+              );
+            }
+            const e = row.event;
+            const isXDate = xOverrideDates.has(e.dateISO);
+            const booking = xCompensations[e.dateISO];
+            return (
             <View key={e.id} style={[styles.eventRow, dateMarkers(dateISOFromTimestampLocal(e.timestampISO), holidayLookup).length > 0 ? styles.highlightRow : null]}>
               <View style={styles.eventMain}>
                 <View style={styles.eventTypeRow}>
-                  <Text style={styles.eventType}>{e.eventType === 'check_in' ? 'Kommen' : 'Gehen'}</Text>
-                  {e.source === 'auto_placeholder' && (
+                  <Text style={styles.eventType}>{isXDate ? xCompensationTitle(booking) : (e.eventType === 'check_in' ? 'Kommen' : 'Gehen')}</Text>
+                  {e.source === 'auto_placeholder' && !isXDate && (
                     <Text style={styles.autoPlaceholderBadge}>(Platzhalter)</Text>
+                  )}
+                  {e.source === 'auto_placeholder' && isXDate && (
+                    <Text style={styles.autoPlaceholderIgnoredBadge}>({xCompensationTitle(booking)} · ignoriert)</Text>
                   )}
                 </View>
                 <Text style={styles.eventMeta}>
                   {e.dateISO} · {e.weekdayLabel} · {e.shiftCode}
                 </Text>
+                {isXDate && (
+                  <Text style={styles.eventMeta}>Hinweis: Tag ist als {xCompensationCode(booking)} ({xCompensationTitle(booking)}) gesetzt.</Text>
+                )}
                 {dateMarkers(dateISOFromTimestampLocal(e.timestampISO), holidayLookup).length > 0 && (
                   <View style={styles.markerRow}>
                     {dateMarkers(dateISOFromTimestampLocal(e.timestampISO), holidayLookup).map((marker) => (
@@ -888,15 +1127,17 @@ export default function TimeClockServiceScreen() {
                 )}
               </View>
               <View style={styles.eventActions}>
-                <Text style={styles.eventTime}>{timePart(e.timestampISO)}</Text>
+                <Text style={styles.eventTime}>
+                  {isXDate ? '—' : timePart(e.timestampISO)}
+                </Text>
                 <TouchableOpacity testID={`timeclock-event-edit-${e.id}`} style={styles.editBtn} onPress={() => openEditModal(e.id)}>
                   <Text style={styles.editBtnText}>Bearbeiten</Text>
                 </TouchableOpacity>
               </View>
             </View>
-          ))
+          )})
         )}
-        {events.length > displayEvents.length && (
+        {events.length > displayRows.length && (
           <Text style={styles.eventsHintText}>Ältere Einträge werden nicht angezeigt.</Text>
         )}
       </View>
@@ -1064,6 +1305,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: 12,
   },
+  stampBtnDisabled: {
+    opacity: 0.45,
+  },
   stampBtnText: {
     color: warmHuman.textInverse,
     fontWeight: typography.fontWeight.bold,
@@ -1083,6 +1327,9 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.md,
     alignItems: 'center',
     paddingVertical: 10,
+  },
+  testPopupBtnDisabled: {
+    opacity: 0.45,
   },
   testPopupBtnText: {
     color: warmHuman.textSecondary,
@@ -1161,6 +1408,12 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.xs,
     color: warmHuman.textMuted,
     fontStyle: 'italic' as const,
+  },
+  autoPlaceholderIgnoredBadge: {
+    fontSize: typography.fontSize.xs,
+    color: semantic.text.warning,
+    fontStyle: 'italic' as const,
+    fontWeight: typography.fontWeight.semibold,
   },
   eventTime: {
     fontSize: typography.fontSize.base,

@@ -249,8 +249,8 @@ export const SHIFT_META: Readonly<Record<ShiftType, ShiftMeta>> = {
   T: { label: 'T', bg: '#FFF7ED', fg: '#C2410C', desc: 'Tagesdienst' },
   KS: { label: 'KS', bg: '#FFE4E6', fg: '#BE123C', desc: 'Kurzer Spätdienst' },
   KN: { label: 'KN', bg: '#E0E7FF', fg: '#3730A3', desc: 'Kurzer Nachtdienst' },
-  // Legacy-Altcode, bleibt lesbar für alte gespeicherte Pläne
-  K: { label: 'K', bg: '#FDF2F8', fg: '#BE185D', desc: 'Kurzer Dienst' },
+  K: { label: 'K', bg: '#FEE2E2', fg: '#B91C1C', desc: 'Krank' },
+  EK: { label: 'EK', bg: '#FFEDD5', fg: '#C2410C', desc: 'entschuldigt Krank' },
   R: { label: 'R', bg: '#F3F4F6', fg: '#6B7280', desc: 'Ruhe' },
   U: { label: 'U', bg: '#ECFDF5', fg: '#059669', desc: 'Urlaub' },
   X: { label: 'X', bg: '#F5F5F4', fg: '#78716C', desc: 'Frei' },

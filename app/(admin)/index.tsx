@@ -16,10 +16,12 @@ import {
   deleteSpace,
   clearProfile,
   clearCurrentSpaceId,
+  getCurrentSpaceId,
+  setCurrentSpaceId,
   setSpaces,
   STORAGE_KEYS,
 } from '../../lib/storage';
-import { removeSpaceMembershipsForProfile, syncTeamSpaces } from '../../lib/backend/teamSync';
+import { deleteSpaceForProfile, removeSpaceMembershipsForProfile, syncTeamSpaces } from '../../lib/backend/teamSync';
 import { useRealtimeMemberSync } from '../../lib/backend/realtimeMembers';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as LocalAuthentication from 'expo-local-authentication';
@@ -46,6 +48,7 @@ export default function AdminScreen() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [biometricType, setBiometricType] = useState<string>('Biometric');
   const [deleteConfirm, setDeleteConfirm] = useState<string | null>(null);
+  const [currentSpaceId, setCurrentSpaceIdState] = useState<string | null>(null);
 
   // Profile Delete: 3-Step Safetylock
   const [showProfileDeleteModal, setShowProfileDeleteModal] = useState(false);
@@ -108,15 +111,16 @@ export default function AdminScreen() {
       setShowProfileDeleteModal(false);
       setProfileDeleteStep(0);
 
-      Promise.all([getProfile(), getSpaces()]).then(([p, s]) => {
+      Promise.all([getProfile(), getSpaces(), getCurrentSpaceId()]).then(([p, s, activeSpaceId]) => {
         (async () => {
           if (!active) return;
           setProfile(p);
+          setCurrentSpaceIdState(activeSpaceId);
 
           let resolvedSpaces = s;
           if (p) {
             try {
-              const syncResult = await syncTeamSpaces(p.id, s);
+              const syncResult = await syncTeamSpaces(p.id, s, { allowCached: true, ttlMs: 10_000 });
               resolvedSpaces = syncResult.spaces;
               await setSpaces(resolvedSpaces);
             } catch {
@@ -156,10 +160,26 @@ export default function AdminScreen() {
       setDeleteConfirm(spaceId);
       return;
     }
+    const target = spaces.find((s) => s.id === spaceId);
+    if (profile && target) {
+      try {
+        await deleteSpaceForProfile(spaceId, profile.id, target.ownerProfileId === profile.id);
+      } catch {
+        // Backend-Cleanup ist best-effort; lokales Löschen darf dadurch nicht blockieren.
+      }
+    }
     await deleteSpace(spaceId);
     const updated = await getSpaces();
     setSpacesState(updated);
+    const active = await getCurrentSpaceId();
+    setCurrentSpaceIdState(active);
     setDeleteConfirm(null);
+  }
+
+  async function handleActivateSpace(spaceId: string) {
+    await setCurrentSpaceId(spaceId);
+    setCurrentSpaceIdState(spaceId);
+    Alert.alert('Space aktiviert', 'YASA arbeitet jetzt in diesem Space.');
   }
 
   // ── Profil löschen – kompletter Cleanup ────────────────────────────────────
@@ -306,8 +326,10 @@ export default function AdminScreen() {
           const profileId = profile?.id ?? '';
           const isOwner = profileId === space.ownerProfileId;
           const isCoAdmin = space.coAdminProfileIds.includes(profileId);
+          const isMember = space.memberProfileIds.includes(profileId);
           const canSeeQR = isOwner || isCoAdmin;
           const confirmingThisSpace = deleteConfirm === space.id;
+          const isActiveSpace = currentSpaceId === space.id;
           const removedCount = (space.memberHistory ?? []).filter((h) => h.active === false).length;
 
           return (
@@ -316,6 +338,9 @@ export default function AdminScreen() {
                 <Text style={styles.spaceName}>{space.name}</Text>
                 <Text style={styles.memberCount}>👥 {space.memberProfileIds.length}</Text>
               </View>
+              <Text style={[styles.activeSpaceHint, isActiveSpace && styles.activeSpaceHintOn]}>
+                {isActiveSpace ? 'Aktiver Arbeits-Space' : 'Nicht aktiv'}
+              </Text>
               {removedCount > 0 && (
                 <Text style={styles.historyHint}>
                   Verlauf: {removedCount} ausgetreten
@@ -330,6 +355,23 @@ export default function AdminScreen() {
                   </Text>
                 </View>
               </View>
+
+              {(isMember || isOwner) && (
+                <View style={styles.actionRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.actionBtn,
+                      isActiveSpace ? styles.actionBtnActiveSpace : styles.actionBtnActivate,
+                    ]}
+                    onPress={() => handleActivateSpace(space.id)}
+                    disabled={isActiveSpace}
+                  >
+                    <Text style={styles.actionBtnText}>
+                      {isActiveSpace ? 'Aktiv' : 'Aktivieren'}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              )}
 
               {/* Admin Actions - Only for Owner/CoAdmin */}
               {(canSeeQR || isOwner) && (
@@ -375,6 +417,15 @@ export default function AdminScreen() {
                     </>
                   )}
                 </View>
+              )}
+
+              {isOwner && (
+                <TouchableOpacity
+                  style={styles.profileTransferBtn}
+                  onPress={() => router.push(`/(space)/profile-transfer?spaceId=${space.id}`)}
+                >
+                  <Text style={styles.profileTransferBtnText}>ID-Profil Transfer</Text>
+                </TouchableOpacity>
               )}
 
               {/* Cancel delete */}
@@ -518,18 +569,18 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
     padding: spacing.lg,
     paddingTop: 60,
-    paddingBottom: 40,
+    paddingBottom: 48,
   },
   headerTitle: {
     fontSize: typography.fontSize['2xl'],
     fontWeight: typography.fontWeight.bold,
     color: colors.textPrimary,
-    marginBottom: spacing.lg,
+    marginBottom: spacing.xl,
   },
   profileBadge: {
     backgroundColor: colors.backgroundSecondary,
     borderRadius: borderRadius.xl,
-    padding: spacing.md,
+    padding: spacing.lg,
     alignItems: 'center',
     width: '100%',
     marginBottom: spacing.xl,
@@ -550,14 +601,14 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     width: '100%',
     marginBottom: spacing.md,
-    marginTop: spacing.md,
+    marginTop: spacing.xl,
   },
   spaceCard: {
     width: '100%',
     backgroundColor: colors.backgroundSecondary,
     borderRadius: borderRadius.xl,
-    padding: spacing.md,
-    marginBottom: spacing.md,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
   },
@@ -565,7 +616,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: spacing.sm,
+    marginBottom: spacing.xs,
   },
   spaceName: {
     fontSize: typography.fontSize.lg,
@@ -579,12 +630,21 @@ const styles = StyleSheet.create({
   historyHint: {
     fontSize: typography.fontSize.xs,
     color: colors.error,
-    marginBottom: spacing.sm,
+    marginBottom: spacing.md,
     fontWeight: typography.fontWeight.semibold,
+  },
+  activeSpaceHint: {
+    fontSize: typography.fontSize.xs,
+    color: colors.textTertiary,
+    marginBottom: spacing.md,
+    fontWeight: typography.fontWeight.semibold,
+  },
+  activeSpaceHintOn: {
+    color: colors.primary,
   },
   roleRow: {
     flexDirection: 'row',
-    marginBottom: spacing.md,
+    marginBottom: spacing.sm,
   },
   roleBadge: {
     borderRadius: borderRadius.sm,
@@ -602,15 +662,19 @@ const styles = StyleSheet.create({
   actionRow: {
     flexDirection: 'row',
     gap: spacing.sm,
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
   },
   actionBtn: {
     flex: 1,
-    minHeight: 44,
+    minHeight: 48,
     borderRadius: borderRadius.lg,
     alignItems: 'center',
     justifyContent: 'center',
   },
   actionBtnPrimary: { backgroundColor: colors.primary },
+  actionBtnActivate: { backgroundColor: '#0F766E' },
+  actionBtnActiveSpace: { backgroundColor: colors.secondary },
   actionBtnManage: { backgroundColor: colors.purple },
   actionBtnRules: { backgroundColor: '#0E7490' }, // teal-700
   actionBtnDelete: {
@@ -626,12 +690,28 @@ const styles = StyleSheet.create({
   },
   actionBtnDeleteText: { color: colors.error },
   actionBtnDeleteTextConfirm: { color: colors.textInverse },
+  profileTransferBtn: {
+    minHeight: 48,
+    borderRadius: borderRadius.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#86EFAC',
+    marginTop: spacing.md,
+  },
+  profileTransferBtnText: {
+    color: '#065F46',
+    fontSize: typography.fontSize.sm,
+    fontWeight: typography.fontWeight.semibold,
+    textAlign: 'center',
+  },
   cancelLink: {
     color: colors.textSecondary,
     fontSize: typography.fontSize.sm,
     textDecorationLine: 'underline',
     textAlign: 'center',
-    marginTop: spacing.xs,
+    marginTop: spacing.sm,
   },
   emptyText: {
     color: colors.textSecondary,
@@ -643,8 +723,8 @@ const styles = StyleSheet.create({
     width: '100%',
     backgroundColor: colors.errorBackground,
     borderRadius: borderRadius.xl,
-    padding: spacing.md,
-    marginBottom: spacing.md,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
     borderWidth: 1,
     borderColor: colors.errorLight,
   },
@@ -652,8 +732,8 @@ const styles = StyleSheet.create({
     width: '100%',
     backgroundColor: colors.backgroundSecondary,
     borderRadius: borderRadius.xl,
-    padding: spacing.md,
-    marginBottom: spacing.md,
+    padding: spacing.lg,
+    marginBottom: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
   },
@@ -661,13 +741,13 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.base,
     fontWeight: typography.fontWeight.bold,
     color: colors.textPrimary,
-    marginBottom: spacing.xs,
+    marginBottom: spacing.sm,
   },
   profileEditDesc: {
     fontSize: typography.fontSize.sm,
     color: colors.textSecondary,
     lineHeight: 20,
-    marginBottom: spacing.md,
+    marginBottom: spacing.lg,
   },
   profileEditBtn: {
     backgroundColor: colors.primary,
@@ -691,13 +771,13 @@ const styles = StyleSheet.create({
     fontSize: typography.fontSize.sm,
     fontWeight: typography.fontWeight.bold,
     color: colors.error,
-    marginBottom: spacing.sm,
+    marginBottom: spacing.md,
   },
   dangerZoneDesc: {
     fontSize: typography.fontSize.sm,
     color: colors.errorDark,
     lineHeight: 20,
-    marginBottom: spacing.md,
+    marginBottom: spacing.lg,
   },
   deleteButton: {
     width: '100%',
@@ -721,7 +801,7 @@ const styles = StyleSheet.create({
     borderRadius: borderRadius.lg,
     width: '100%',
     alignItems: 'center',
-    marginTop: spacing.md,
+    marginTop: spacing.lg,
     minHeight: accessibility.minTapHeight,
   },
   buttonSecondary: { backgroundColor: colors.secondary },

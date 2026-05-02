@@ -16,7 +16,7 @@ import type { Holiday } from '../data/holidays';
 // ─── Hilfskonstanten ──────────────────────────────────────────────────────────
 
 /** Shift-Codes, die als Arbeitstag gewertet werden */
-const WORK_CODES: ReadonlySet<ShiftType> = new Set(['F', 'S', 'N', 'T', 'KS', 'KN', 'K']);
+const WORK_CODES: ReadonlySet<ShiftType> = new Set(['F', 'S', 'N', 'T', 'KS', 'KN']);
 
 /** ISO-Daten der "Vorfesttage" (Heiligabend + Silvester) – statisch */
 function isPreHolidayDate(dateISO: string): boolean {
