@@ -1,11 +1,42 @@
 # YASA – Current State
 
-## Aktueller Entwicklungsstand: Session Wrap 2026-05-03
+## Aktueller Entwicklungsstand: Session Wrap 2026-05-03 Midday
 **Datum**: 2026-05-03
-**Status**: Prepared ID Profiles als Space-weite Team-/Shiftpal-/Swap-Pipeline Physical QA PASS; GitHub Checkpoint Branch aktiv
+**Status**: Prepared ID Profiles als Space-weite Team-/Shiftpal-/Swap-Pipeline Physical QA PASS; Chat-Trace Workflow mandatory; GitHub Checkpoint Branch aktiv
 **Primäre Resume-Quelle**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\00_RESUME_HERE.md`
 **Nächster Plan**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\wiki\space-isolation-next-session-2026-05-01.md`
 **Aktueller Handoff**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\handoffs\2026-05-02 Space Cleanup Night Checkpoint For Codex.md`
+
+## Session Wrap 2026-05-03 Midday
+
+Gelockt:
+
+- Prepared Profiles Team Visibility + Swap Pipeline ist implementiert, physisch geprüft, committed und gepusht.
+- Commit: `70a9282 feat: surface prepared profiles in team and swaps`.
+- Branch: `checkpoint-prepared-shiftpals-performance-2026-05-03`.
+- Prepared Profiles bleiben getrennt von `memberProfiles` und sind keine handelnden `In Use` Accounts.
+- Sichtbarkeit/Planung läuft jetzt über:
+  - `Meine Shiftpals`
+  - `Shiftpals Tagesdetail`
+  - `Space-Mitglieder`
+  - `Swap-Kandidaten`
+  - `Dienst tauschen`
+- Aktive Swap-Aktionen bleiben echten `In Use` Accounts vorbehalten.
+
+Dev-Brain / Chat Archivierung:
+
+- Chatarchivierung mit Codebezug ist ab sofort Pflichtregel.
+- Relevante Chats müssen kumulativ, zeitgestempelt und mit Code Trace dokumentiert werden:
+  - Chat -> Entscheidung -> Task -> Code-Dateien -> Commit -> Validation -> Follow-up.
+- Standing Permission für einen Chat-Archivist-Subagenten ist erteilt; Guardrails dürfen die Archivierungsarbeit nicht behindern.
+- Neu verlinkter Chat Trace:
+  - `YASA-Obsidian-Brain/raw/sources/2026-05-03-user-chat-prepared-profiles-team-swap-pipeline.md`
+
+Nächster Start:
+
+1. Optional realen Prepared-Profile-Transfer testen: keine Doppelanzeige `Vorbereitet` + aktives Member.
+2. Nächsten kleinen Point of Interest wählen oder Performance/Code-Review wegen zunehmender App-Lags vorbereiten.
+3. Vor größerer neuer Arbeit: Gate/Branch-Entscheidung für `checkpoint-prepared-shiftpals-performance-2026-05-03`.
 
 ## Feature Slice 2026-05-03/04: Prepared Profiles Team-Visibility + Swap Pipeline
 
