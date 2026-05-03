@@ -1,11 +1,52 @@
 # YASA – Current State
 
-## Aktueller Entwicklungsstand: Performance Pass 1 nach Prepared Shiftpals
+## Aktueller Entwicklungsstand: Session Wrap 2026-05-03
 **Datum**: 2026-05-03
-**Status**: Prepared ID Profiles Physical QA PASS; Performance Pass 1 technisch gegatet und auf beide Geräte installiert
+**Status**: Prepared ID Profiles + Device-B Hotfix Physical QA weitgehend PASS; GitHub Checkpoint Branch gepusht
 **Primäre Resume-Quelle**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\00_RESUME_HERE.md`
 **Nächster Plan**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\wiki\space-isolation-next-session-2026-05-01.md`
 **Aktueller Handoff**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\handoffs\2026-05-02 Space Cleanup Night Checkpoint For Codex.md`
+
+## Session Wrap 2026-05-03
+
+Heute gelockt:
+
+- Prepared ID Profiles bleiben getrennt von `memberProfiles`.
+- Prepared ID Profiles dienen als Host-authored read-only Shiftpal-Roster für alle Space-Members.
+- `Meine Shiftpals` und `Shiftpals Tagesdetails` zeigen Prepared Entries, wenn deren verankertes Muster zur eigenen aktuellen Schicht passt.
+- Device B steht stellvertretend für alle weiteren Member-Geräte: Device B = Device C = Device D usw.; nur Host/Owner-Geräte haben zusätzliche Prepared-Profile-Authoring-Rechte.
+- Member können im Admin-Bereich einen Space verlassen; Host/Owner behält den Space-Delete-Flow.
+- Performance Pass 1 reduziert redundante Focus-Sync-Arbeit, ohne Realtime-/Action-/Management-Syncs zu cachen.
+
+Physical QA / User-Rückmeldung:
+
+- Space-Austritt auf Device B läuft flawless.
+- Prepared Shiftpal Matching auf Device B läuft.
+- Hinweis unter `Meine Shiftpals`: `Auf diesem Gerät liegen noch nicht alle Team-Dienstpläne vor.` ist fachlich nicht fatal, aber im Prepared-Profiles-Kontext missverständlich.
+  - Gemeint sind echte aktive Members ohne lokal synchronisierten Dienstplan.
+  - Prepared Profiles werden trotzdem berücksichtigt.
+  - Morgen textlich entschärfen, z. B. `Einige aktive Member-Dienstpläne sind noch nicht synchronisiert. Vorbereitete Profile werden trotzdem berücksichtigt.`
+
+GitHub:
+
+- Checkpoint-Branch gepusht: `checkpoint-prepared-shiftpals-performance-2026-05-03`.
+- Commits:
+  - `b21974e checkpoint: lock space cleanup and prepared shiftpals`
+  - `04e9d4b fix: restore member leave and prepared roster sync`
+- PR-Link: `https://github.com/Qinyagi/yasa/pull/new/checkpoint-prepared-shiftpals-performance-2026-05-03`
+- `master` blieb unverändert; der Checkpoint kann morgen kontrolliert gemerged werden.
+
+Morgen direkt starten:
+
+1. Kurzer Physical QA Sweep auf Device A/B:
+   - `Meine Shiftpals`
+   - `Shiftpals Tagesdetails`
+   - `Admin -> Space verlassen` nur auf Member-Gerät
+   - `Admin -> Space löschen` nur Host
+   - `Deine Spaces` active Space bleibt device-local
+2. Hinweistext für fehlende echte Member-Dienstpläne im Prepared-Kontext entschärfen.
+3. Optional: Checkpoint-Branch nach erneutem Gate in `master` mergen.
+4. Danach erst nächstes Produkt-Thema wählen; keine neue große Feature-Fläche vor Wrap-Gate.
 
 ## Performance Pass 1 2026-05-03: Focus-Sync Entlastung
 
