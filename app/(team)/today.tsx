@@ -489,7 +489,7 @@ export default function TodayScreen() {
           {noPlansCount > 0 && (
             <View style={styles.noPlansHintBox}>
               <Text style={styles.noPlansHintText}>
-                ℹ️ Auf diesem Gerät liegen noch nicht alle Team-Dienstpläne vor.
+                ℹ️ Einige aktive Member-Dienstpläne sind noch nicht synchronisiert. Vorbereitete Profile werden trotzdem berücksichtigt.
               </Text>
             </View>
           )}

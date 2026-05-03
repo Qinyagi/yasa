@@ -15,10 +15,14 @@ import {
   getSpaces,
   getCurrentSpaceId,
   getAllShiftPlans,
+  getPreparedIdProfiles,
   getShiftPlanFromMapForSpace,
+  setSpaces,
   todayISO,
   isValidISODate,
 } from '../../lib/storage';
+import { syncTeamSpaces } from '../../lib/backend/teamSync';
+import { buildPreparedSwapCandidates } from '../../lib/preparedProfilesShiftpals';
 import { colors } from '../../constants/theme';
 import { MultiavatarView } from '../../components/MultiavatarView';
 import { resolveAvatarSeed } from '../../lib/avatarSeed';
@@ -41,6 +45,9 @@ function formatGerman(dateISO: string): string {
 
 interface CandidateEntry {
   member: MemberSnapshot;
+  isPrepared?: boolean;
+  preparedProfileId?: string;
+  code?: ShiftType;
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -121,7 +128,16 @@ export default function CandidatesScreen() {
           return;
         }
 
-        const spaces = await getSpaces();
+        const localSpaces = await getSpaces();
+        let spaces = localSpaces;
+        try {
+          const syncResult = await syncTeamSpaces(p.id, localSpaces, { allowCached: true, ttlMs: 10_000 });
+          spaces = syncResult.spaces;
+          await setSpaces(spaces);
+        } catch {
+          // Best effort: local candidate calculation remains available.
+        }
+
         const activeSpace = spaces.find((s) => s.id === currentSpaceId) ?? null;
         if (!active) return;
         setSpace(activeSpace);
@@ -164,12 +180,22 @@ export default function CandidatesScreen() {
 
           // Frei = R (Ruhe), U (Urlaub), X (Platzhalter/Frei)
           if (memberEntry.code === 'R' || memberEntry.code === 'X' || memberEntry.code === 'U') {
-            result.push({ member });
+            result.push({ member, code: memberEntry.code });
           }
         }
 
+        const preparedProfiles = await getPreparedIdProfiles(currentSpaceId);
+        const preparedCandidates: CandidateEntry[] = buildPreparedSwapCandidates(
+          preparedProfiles,
+          dateISO,
+          activeSpace.memberProfiles.map((member) => member.id)
+        ).map((entry) => ({
+          ...entry,
+          isPrepared: true,
+        }));
+
         if (active) {
-          setCandidates(result);
+          setCandidates([...result, ...preparedCandidates]);
           setMembersWithoutPlan(withoutPlan);
           setLoading(false);
         }
@@ -323,15 +349,23 @@ export default function CandidatesScreen() {
           </Text>
         </View>
       ) : (
-        candidates.map(({ member }) => (
+        candidates.map(({ member, isPrepared, code }) => (
           <View key={member.id} style={styles.candidateRow}>
             <MultiavatarView
               seed={resolveAvatarSeed(member.id, member.displayName, member.avatarUrl)}
               size={42}
             />
-            <Text style={styles.candidateName}>{member.displayName}</Text>
+            <View style={styles.candidateTextCol}>
+              <Text style={styles.candidateName}>{member.displayName}</Text>
+              {isPrepared && <Text style={styles.preparedHint}>Vorbereitetes ID-Profil</Text>}
+            </View>
+            {isPrepared && (
+              <View style={[styles.badge, styles.badgePrepared]}>
+                <Text style={[styles.badgeText, styles.badgeTextPrepared]}>Vorbereitet</Text>
+              </View>
+            )}
             <View style={[styles.badge, styles.badgeFree]}>
-              <Text style={[styles.badgeText, styles.badgeTextFree]}>Frei</Text>
+              <Text style={[styles.badgeText, styles.badgeTextFree]}>{code ?? 'Frei'}</Text>
             </View>
           </View>
         ))
@@ -519,10 +553,17 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   candidateName: {
-    flex: 1,
     fontSize: 15,
     fontWeight: '600',
     color: colors.textPrimary,
+  },
+  candidateTextCol: {
+    flex: 1,
+  },
+  preparedHint: {
+    marginTop: 2,
+    fontSize: 12,
+    color: colors.textTertiary,
   },
   // Badges
   badge: {
@@ -541,6 +582,12 @@ const styles = StyleSheet.create({
   },
   badgeTextFree: {
     color: colors.successDark,
+  },
+  badgePrepared: {
+    backgroundColor: '#FFEDD5',
+  },
+  badgeTextPrepared: {
+    color: '#C2410C',
   },
   // Empty State
   emptyBox: {

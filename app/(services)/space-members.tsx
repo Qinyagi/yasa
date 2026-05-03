@@ -12,6 +12,7 @@ import {
   getCurrentSpaceId,
   getProfile,
   getSpaces,
+  getPreparedIdProfiles,
   listGhosts,
   setSpaces,
 } from '../../lib/storage';
@@ -22,6 +23,7 @@ import { MultiavatarView } from '../../components/MultiavatarView';
 import { Button } from '../../components/Button';
 import { borderRadius, spacing, typography, warmHuman } from '../../constants/theme';
 import type { MemberLifecycleEntry, Space, UserProfile } from '../../types';
+import type { PreparedIdProfile } from '../../types/preparedProfile';
 
 function formatTimestamp(iso?: string): string {
   if (!iso) return '–';
@@ -45,6 +47,7 @@ export default function SpaceMembersReadonlyScreen() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [space, setSpace] = useState<Space | null>(null);
   const [ghosts, setGhosts] = useState<UserProfile[]>([]);
+  const [preparedProfiles, setPreparedProfiles] = useState<PreparedIdProfile[]>([]);
 
   const loadData = useCallback(async (allowCachedSync = false) => {
     const [p, currentSpaceId, localSpaces] = await Promise.all([
@@ -57,6 +60,7 @@ export default function SpaceMembersReadonlyScreen() {
     if (!p || !currentSpaceId) {
       setSpace(null);
       setGhosts([]);
+      setPreparedProfiles([]);
       setLoading(false);
       return;
     }
@@ -83,8 +87,14 @@ export default function SpaceMembersReadonlyScreen() {
       } catch {
         setGhosts([]);
       }
+      try {
+        setPreparedProfiles(await getPreparedIdProfiles(found.id));
+      } catch {
+        setPreparedProfiles([]);
+      }
     } else {
       setGhosts([]);
+      setPreparedProfiles([]);
     }
     setLoading(false);
   }, []);
@@ -118,6 +128,16 @@ export default function SpaceMembersReadonlyScreen() {
   const removedMembers = useMemo(
     () => history.filter((h) => h.active === false),
     [history]
+  );
+
+  const activeMemberIds = useMemo(
+    () => new Set(space?.memberProfiles.map((member) => member.id) ?? []),
+    [space?.memberProfiles]
+  );
+
+  const visiblePreparedProfiles = useMemo(
+    () => preparedProfiles.filter((prepared) => !activeMemberIds.has(prepared.profileId)),
+    [activeMemberIds, preparedProfiles]
   );
 
   const snapshotMap = useMemo(() => {
@@ -187,7 +207,7 @@ export default function SpaceMembersReadonlyScreen() {
 
       <View style={styles.infoBox}>
         <Text style={styles.infoText}>
-          Du siehst hier die aktuelle Belegung, Join-Timeline und Ghosts. Änderungen sind nur für Host/CoAdmin im Space-Admin möglich.
+          Du siehst hier die aktuelle Belegung, vorbereitete ID-Profile, Join-Timeline und Ghosts. Änderungen sind nur für Host/CoAdmin im Space-Admin möglich.
         </Text>
       </View>
 
@@ -226,11 +246,52 @@ export default function SpaceMembersReadonlyScreen() {
                         {isHost ? 'Host' : isCoAdmin ? 'CoAdmin' : 'Member'}
                       </Text>
                     </View>
+                    <View style={[styles.roleBadge, styles.roleInUse]}>
+                      <Text style={styles.roleText}>In Use</Text>
+                    </View>
                   </View>
                   <Text style={styles.metaText}>
                     Beigetreten: {formatTimestamp(entry.joinedAt)}
                   </Text>
                   <Text style={styles.metaText}>{inviterLabel(entry)}</Text>
+                </View>
+              </View>
+            </View>
+          );
+        })
+      )}
+
+      <Text style={styles.sectionLabel}>Vorbereitete ID-Profile ({visiblePreparedProfiles.length})</Text>
+      {visiblePreparedProfiles.length === 0 ? (
+        <Text style={styles.emptyText}>Keine vorbereiteten ID-Profile im aktiven Space.</Text>
+      ) : (
+        visiblePreparedProfiles.map((prepared) => {
+          const seed = resolveAvatarSeed(prepared.profileId, prepared.displayName, prepared.avatarUrl);
+          const hasPattern = !!prepared.assignedPattern;
+          const statusLabel = prepared.status === 'transferred' ? 'Transfer gestartet' : 'Vorbereitet';
+
+          return (
+            <View key={prepared.id} style={styles.card}>
+              <View style={styles.cardRow}>
+                <View style={styles.avatarArea}>
+                  <MultiavatarView seed={seed} size={72} />
+                </View>
+                <View style={styles.cardBody}>
+                  <View style={styles.nameRow}>
+                    <Text style={styles.name}>{prepared.displayName}</Text>
+                    <View style={[styles.roleBadge, styles.rolePrepared]}>
+                      <Text style={styles.roleText}>{statusLabel}</Text>
+                    </View>
+                  </View>
+                  <Text style={styles.metaText}>
+                    Account-Typ: Prepared ID Profile, noch nicht In Use
+                  </Text>
+                  <Text style={styles.metaText}>
+                    Dienstplan: {hasPattern ? prepared.assignedPattern?.templateName : 'Noch kein Muster hinterlegt'}
+                  </Text>
+                  <Text style={styles.metaText}>
+                    Vorbereitet: {formatTimestamp(prepared.createdAt)}
+                  </Text>
                 </View>
               </View>
             </View>
@@ -427,6 +488,12 @@ const styles = StyleSheet.create({
   },
   roleGhost: {
     backgroundColor: '#8B5CF6',
+  },
+  roleInUse: {
+    backgroundColor: '#0F766E',
+  },
+  rolePrepared: {
+    backgroundColor: '#EA580C',
   },
   roleText: {
     color: '#fff',

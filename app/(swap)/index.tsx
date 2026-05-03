@@ -20,6 +20,8 @@ import {
   getProfile,
   getCurrentSpaceId,
   getSpaces,
+  setSpaces,
+  getPreparedIdProfiles,
   getShiftForDate,
   getSwapCandidates,
   createSwapRequest,
@@ -32,11 +34,18 @@ import {
   isValidISODate,
   type SwapCandidate,
 } from '../../lib/storage';
+import { syncTeamSpaces } from '../../lib/backend/teamSync';
+import { buildPreparedSwapCandidates } from '../../lib/preparedProfilesShiftpals';
 import type { SwapRequest, ShiftType, UserProfile, Space } from '../../types';
 
 const PAGE_PADDING = 24;
 
 type TabType = 'open' | 'mine';
+
+interface SwapCandidateView extends SwapCandidate {
+  isPrepared?: boolean;
+  preparedProfileId?: string;
+}
 
 function padTwo(n: number): string {
   return n < 10 ? `0${n}` : `${n}`;
@@ -95,7 +104,7 @@ export default function SwapScreen() {
   // Neuanfrage State
   const [selectedDate, setSelectedDate] = useState(params.dateISO || todayISO());
   const [myShift, setMyShift] = useState<ShiftType | null>(null);
-  const [candidates, setCandidates] = useState<SwapCandidate[]>([]);
+  const [candidates, setCandidates] = useState<SwapCandidateView[]>([]);
   const [message, setMessage] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
@@ -126,7 +135,16 @@ export default function SwapScreen() {
       return;
     }
 
-    const allSpaces = await getSpaces();
+    const localSpaces = await getSpaces();
+    let allSpaces = localSpaces;
+    try {
+      const syncResult = await syncTeamSpaces(p.id, localSpaces, { allowCached: true, ttlMs: 10_000 });
+      allSpaces = syncResult.spaces;
+      await setSpaces(allSpaces);
+    } catch {
+      // Best effort: keep local swap workflow available.
+    }
+
     const activeSpace = allSpaces.find((s) => s.id === sid) ?? null;
     setSpace(activeSpace);
 
@@ -149,8 +167,22 @@ export default function SwapScreen() {
     const shift = await getShiftForDate(p.id, forDate);
     setMyShift(shift);
 
-    const cands = await getSwapCandidates(sid, forDate, p.id);
-    setCandidates(cands);
+    const activeMemberIds = activeSpace?.memberProfiles.map((member) => member.id) ?? [];
+    const cands: SwapCandidateView[] = await getSwapCandidates(sid, forDate, p.id);
+    const preparedProfiles = await getPreparedIdProfiles(sid);
+    const preparedCandidates: SwapCandidateView[] = buildPreparedSwapCandidates(
+      preparedProfiles,
+      forDate,
+      activeMemberIds
+    ).map((entry) => ({
+      profileId: entry.member.id,
+      displayName: entry.member.displayName,
+      avatarUrl: entry.member.avatarUrl ?? '',
+      shiftCode: entry.code,
+      isPrepared: true,
+      preparedProfileId: entry.preparedProfileId,
+    }));
+    setCandidates([...cands, ...preparedCandidates]);
 
     setLoading(false);
   }, []);

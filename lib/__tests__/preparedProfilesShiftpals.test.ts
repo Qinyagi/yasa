@@ -1,5 +1,5 @@
 import assert from 'assert';
-import { buildPreparedShiftpalEntries } from '../preparedProfilesShiftpals';
+import { buildPreparedShiftpalEntries, buildPreparedSwapCandidates } from '../preparedProfilesShiftpals';
 import type { PreparedIdProfile } from '../../types/preparedProfile';
 
 function preparedProfile(overrides: Partial<PreparedIdProfile> = {}): PreparedIdProfile {
@@ -50,7 +50,7 @@ test('shows prepared profile when derived shift matches viewed user shift', () =
   assert.strictEqual(entries[0].preparedProfileId, 'prepared-1');
 });
 
-test('hides prepared profile when derived shift does not match', () => {
+test('hides prepared shiftpal when derived shift does not match', () => {
   const entries = buildPreparedShiftpalEntries(
     [preparedProfile()],
     '2026-05-02',
@@ -60,7 +60,7 @@ test('hides prepared profile when derived shift does not match', () => {
   assert.strictEqual(entries.length, 0);
 });
 
-test('hides profiles without assigned pattern', () => {
+test('hides shiftpal profiles without assigned pattern', () => {
   const entries = buildPreparedShiftpalEntries(
     [preparedProfile({ assignedPattern: undefined })],
     '2026-05-01',
@@ -70,7 +70,7 @@ test('hides profiles without assigned pattern', () => {
   assert.strictEqual(entries.length, 0);
 });
 
-test('hides transferred profiles to avoid active-member duplication', () => {
+test('hides transferred shiftpal profiles to avoid active-member duplication', () => {
   const entries = buildPreparedShiftpalEntries(
     [preparedProfile({ status: 'transferred' })],
     '2026-05-01',
@@ -80,7 +80,7 @@ test('hides transferred profiles to avoid active-member duplication', () => {
   assert.strictEqual(entries.length, 0);
 });
 
-test('hides prepared profile when same profile id is already an active member', () => {
+test('hides prepared shiftpal when same profile id is already an active member', () => {
   const entries = buildPreparedShiftpalEntries(
     [preparedProfile()],
     '2026-05-01',
@@ -91,4 +91,44 @@ test('hides prepared profile when same profile id is already an active member', 
   assert.strictEqual(entries.length, 0);
 });
 
-console.log('\n  Ergebnis: 5 bestanden, 0 fehlgeschlagen');
+test('shows prepared swap candidate when derived shift is free', () => {
+  const entries = buildPreparedSwapCandidates(
+    [preparedProfile()],
+    '2026-05-02'
+  );
+
+  assert.strictEqual(entries.length, 1);
+  assert.strictEqual(entries[0].member.id, 'future-member-1');
+  assert.strictEqual(entries[0].code, 'R');
+  assert.strictEqual(entries[0].preparedProfileId, 'prepared-1');
+});
+
+test('hides prepared swap candidate when derived shift is not free', () => {
+  const entries = buildPreparedSwapCandidates(
+    [preparedProfile()],
+    '2026-05-01'
+  );
+
+  assert.strictEqual(entries.length, 0);
+});
+
+test('hides transferred prepared swap candidates', () => {
+  const entries = buildPreparedSwapCandidates(
+    [preparedProfile({ status: 'transferred' })],
+    '2026-05-02'
+  );
+
+  assert.strictEqual(entries.length, 0);
+});
+
+test('hides prepared swap candidate when same profile id is already an active member', () => {
+  const entries = buildPreparedSwapCandidates(
+    [preparedProfile()],
+    '2026-05-02',
+    ['future-member-1']
+  );
+
+  assert.strictEqual(entries.length, 0);
+});
+
+console.log('\n  Ergebnis: 9 bestanden, 0 fehlgeschlagen');

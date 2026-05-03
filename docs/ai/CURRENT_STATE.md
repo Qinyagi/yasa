@@ -2,10 +2,50 @@
 
 ## Aktueller Entwicklungsstand: Session Wrap 2026-05-03
 **Datum**: 2026-05-03
-**Status**: Prepared ID Profiles + Device-B Hotfix Physical QA weitgehend PASS; GitHub Checkpoint Branch gepusht
+**Status**: Prepared ID Profiles als Space-weite Team-/Shiftpal-/Swap-Pipeline Physical QA PASS; GitHub Checkpoint Branch aktiv
 **Primäre Resume-Quelle**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\00_RESUME_HERE.md`
 **Nächster Plan**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\wiki\space-isolation-next-session-2026-05-01.md`
 **Aktueller Handoff**: `C:\Users\XyZ\Documents\YASA\YASA-Obsidian-Brain\handoffs\2026-05-02 Space Cleanup Night Checkpoint For Codex.md`
+
+## Feature Slice 2026-05-03/04: Prepared Profiles Team-Visibility + Swap Pipeline
+
+Produktentscheidung:
+
+- Prepared ID Profiles sind reale Team-Repräsentanten mit Dienstplanmuster, aber noch keine handelnden `In Use` Accounts.
+- Sie dürfen sichtbar, matchbar und planbar sein.
+- Sie dürfen nicht in `memberProfiles` gemischt werden und bekommen keine Rollen, CoAdmin-Rechte, Membership-State oder aktive Swap-Antwortfähigkeit.
+- Nach echter QR-Übernahme kippt die Darstellung automatisch aus `Vorbereitet` heraus, weil `transferred` und/oder aktive `profileId` dedupliziert werden.
+
+Implementiert:
+
+- `Space-Mitglieder` zeigt:
+  - echte aktive Members mit Badge `In Use`
+  - Prepared ID Profiles in eigener Sektion mit Badge `Vorbereitet`
+  - hinterlegtes Dienstplanmuster je Prepared Profile
+- Separate `Swap-Kandidaten` Page berücksichtigt Prepared Profiles mit Dienstplanmuster.
+  - Prepared Profile erscheint, wenn das Muster am gewählten Tag `R`, `U` oder `X` ergibt.
+  - Anzeige mit Marker `Vorbereitet`.
+- `Dienst tauschen` zeigt Prepared Profiles ebenfalls in der Kandidatenliste als Planungshilfe.
+  - Hinweis: Prepared Profile zeigen reale Dienstplanlage, können aber erst nach Übernahme aktiv antworten.
+  - Echte Tauschanfragen/Annahme/Ablehnung bleiben auf aktive `In Use` Accounts begrenzt.
+- `Meine Shiftpals` Hinweistext entschärft:
+  - `Einige aktive Member-Dienstpläne sind noch nicht synchronisiert. Vorbereitete Profile werden trotzdem berücksichtigt.`
+- Shared Helper erweitert:
+  - `buildPreparedSwapCandidates(...)` neben `buildPreparedShiftpalEntries(...)`.
+
+Validierung:
+
+- `npm run typecheck`: PASS
+- `npx sucrase-node lib/__tests__/preparedProfilesShiftpals.test.ts`: PASS
+- `npm test`: PASS
+- `npm run ops:android:release-install`: PASS auf Device A `KNMVMVGY89NFHAQ4` und Device B `R5CX15JX98E`
+
+Physical QA / User-Rückmeldung:
+
+- `Space-Mitglieder` visuell perfekt umgesetzt.
+- `Swap-Kandidaten` zeigen Prepared Profiles.
+- `Dienst tauschen` zeigt Prepared Profiles ebenfalls in der Kandidatenliste.
+- User bestätigt: Pipeline liegt; vollständige aktive Verdrahtung folgt, wenn reale Team-Members ihre ID-Profiles bezogen haben.
 
 ## Session Wrap 2026-05-03
 

@@ -8,6 +8,17 @@ export interface PreparedShiftpalEntry {
   preparedProfileId: string;
 }
 
+export interface PreparedSwapCandidateEntry {
+  member: MemberSnapshot;
+  code: ShiftType;
+  preparedProfileId: string;
+}
+
+function isPreparedProfileVisible(profileId: string, status: string, activeMemberIds: Set<string>): boolean {
+  if (status === 'transferred') return false;
+  return !activeMemberIds.has(profileId);
+}
+
 export function buildPreparedShiftpalEntries(
   preparedProfiles: PreparedIdProfile[],
   viewedDateISO: string,
@@ -18,8 +29,7 @@ export function buildPreparedShiftpalEntries(
   const activeIds = new Set(activeMemberIds);
 
   return preparedProfiles.flatMap((profile) => {
-    if (profile.status === 'transferred') return [];
-    if (activeIds.has(profile.profileId)) return [];
+    if (!isPreparedProfileVisible(profile.profileId, profile.status, activeIds)) return [];
     if (!profile.assignedPattern) return [];
     if (profile.assignedPattern.pattern.length === 0) return [];
 
@@ -30,6 +40,42 @@ export function buildPreparedShiftpalEntries(
     );
 
     if (code !== myShift) return [];
+
+    return [
+      {
+        member: {
+          id: profile.profileId,
+          displayName: profile.displayName,
+          avatarUrl: profile.avatarUrl,
+        },
+        code,
+        preparedProfileId: profile.id,
+      },
+    ];
+  });
+}
+
+export function buildPreparedSwapCandidates(
+  preparedProfiles: PreparedIdProfile[],
+  viewedDateISO: string,
+  activeMemberIds: string[] = []
+): PreparedSwapCandidateEntry[] {
+  const freeCodes = new Set<ShiftType>(['R', 'U', 'X']);
+  const activeIds = new Set(activeMemberIds);
+
+  return preparedProfiles.flatMap((profile) => {
+    if (!isPreparedProfileVisible(profile.profileId, profile.status, activeIds)) return [];
+    if (!profile.assignedPattern) return [];
+    if (profile.assignedPattern.pattern.length === 0) return [];
+
+    const code = shiftCodeAtDate(
+      profile.assignedPattern.anchorDateISO,
+      profile.assignedPattern.pattern,
+      viewedDateISO
+    );
+
+    if (!code) return [];
+    if (!freeCodes.has(code)) return [];
 
     return [
       {
